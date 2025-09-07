@@ -1,12 +1,14 @@
-import { CacheModule } from '@nestjs/cache-manager';// <-- add CacheModule
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { MongooseModule } from '@nestjs/mongoose';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
-import databaseConfig from './config/database.config';
+import { AuthModule } from './auth/auth.module';
+import { PaymentsModule } from './payments/payments.module';
+import { TransactionsModule } from './transactions/transactions.module';
+import { WebhooksModule } from './webhooks/webhooks.module';
 import { HealthController } from './health/health.controller';
-// import { Cache } from 'cache-manager'; // <-- this import is not needed here
+import databaseConfig from './config/database.config';
 
 @Module({
   imports: [
@@ -17,21 +19,16 @@ import { HealthController } from './health/health.controller';
     }),
     MongooseModule.forRootAsync({
       imports: [ConfigModule],
+      useFactory: async (configService: ConfigService) => ({
+        uri: configService.get<string>('database.uri'),
+        ...configService.get('database.options'),
+      }),
       inject: [ConfigService],
-      useFactory: async (configService: ConfigService) => {
-        const uri = configService.get<string>('database.uri');
-        const options = configService.get<Record<string, any>>('database.options') || {};
-        return {
-          uri,
-          ...options,
-        };
-      },
     }),
-    CacheModule.register({ // <-- add this
-      ttl: 300, // cache time-to-live in seconds
-      max: 100, // maximum number of items in cache
-      isGlobal: true, // optional: makes cache available globally
-    }),
+    AuthModule,
+    PaymentsModule,
+    TransactionsModule,
+    WebhooksModule,
   ],
   controllers: [AppController, HealthController],
   providers: [AppService],

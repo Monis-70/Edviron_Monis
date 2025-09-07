@@ -1,22 +1,16 @@
-import { Injectable, NotFoundException, Inject } from '@nestjs/common';
+import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
-import { CACHE_MANAGER } from '@nestjs/cache-manager';
-import { Cache } from 'cache-manager';
-import PDFDocument from 'pdfkit';
-
 import { Order, OrderDocument } from '../schemas/order.schema';
 import { OrderStatus, OrderStatusDocument } from '../schemas/order-status.schema';
 import { GetTransactionsDto } from './dto/get-transactions.dto';
 import { TransactionFiltersDto } from './dto/transaction-filters.dto';
-
 
 @Injectable()
 export class TransactionsService {
   constructor(
     @InjectModel(Order.name) private orderModel: Model<OrderDocument>,
     @InjectModel(OrderStatus.name) private orderStatusModel: Model<OrderStatusDocument>,
-    @Inject(CACHE_MANAGER) private cacheManager: Cache,
   ) {}
 
   async getAllTransactions(query: GetTransactionsDto) {
@@ -34,10 +28,8 @@ export class TransactionsService {
       search,
     } = query;
 
-    // Build aggregation pipeline
     const pipeline: any[] = [];
 
-    // Stage 1: Lookup to join with order_status
     pipeline.push({
       $lookup: {
         from: 'order_status',
@@ -47,7 +39,6 @@ export class TransactionsService {
       },
     });
 
-    // Stage 2: Unwind status_info
     pipeline.push({
       $unwind: {
         path: '$status_info',
@@ -55,7 +46,6 @@ export class TransactionsService {
       },
     });
 
-    // Stage 3: Add computed fields
     pipeline.push({
       $addFields: {
         collect_id: '$_id',
@@ -69,7 +59,6 @@ export class TransactionsService {
       },
     });
 
-    // Stage 4: Match filters
     const matchStage: any = {};
 
     if (status) {
@@ -113,7 +102,6 @@ export class TransactionsService {
       pipeline.push({ $match: matchStage });
     }
 
-    // Stage 5: Facet for pagination and data
     const sortField = this.mapSortField(sort);
     const sortOrder = order === 'desc' ? -1 : 1;
     const skip = (page - 1) * limit;
@@ -175,7 +163,6 @@ export class TransactionsService {
       },
     });
 
-    // Stage 6: Reshape output
     pipeline.push({
       $project: {
         data: 1,
@@ -184,18 +171,9 @@ export class TransactionsService {
       },
     });
 
-    // Check cache first
-    const cacheKey = `transactions:${JSON.stringify(query)}`;
-    const cached = await this.cacheManager.get(cacheKey);
-    if (cached) {
-      return cached;
-    }
-
-    // Execute aggregation
     const result = await this.orderModel.aggregate(pipeline);
     const response = result[0] || { data: [], pagination: null, summary: null };
 
-    // Format response
     const formattedResponse = {
       success: true,
       data: response.data,
@@ -215,36 +193,30 @@ export class TransactionsService {
       },
     };
 
-    // Cache the result
-    await this.cacheManager.set(cacheKey, formattedResponse, 300);
-
     return formattedResponse;
   }
 
   async getTransactionsBySchool(schoolId: string, filters: TransactionFiltersDto) {
-const {
-  page = 1,
-  limit = 10,
-  status,
-  startDate,
-  endDate,
-  sort = 'created_at',
-  order = 'desc',
-} = filters;
+    const {
+      page = 1,
+      limit = 10,
+      status,
+      startDate,
+      endDate,
+      sort = 'created_at',
+      order = 'desc',
+    } = filters;
 
-    // Validate schoolId
     if (!Types.ObjectId.isValid(schoolId)) {
       throw new NotFoundException('Invalid school ID');
     }
 
     const pipeline: any[] = [];
 
-    // Match school_id first
     pipeline.push({
       $match: { school_id: new Types.ObjectId(schoolId) },
     });
 
-    // Join with order_status
     pipeline.push({
       $lookup: {
         from: 'order_status',
@@ -261,7 +233,6 @@ const {
       },
     });
 
-    // Add filters
     const matchFilters: any = {};
 
     if (status) {
@@ -282,7 +253,6 @@ const {
       pipeline.push({ $match: matchFilters });
     }
 
-    // Group by date for analytics
     pipeline.push({
       $group: {
         _id: {
@@ -305,7 +275,6 @@ const {
       },
     });
 
-    // Sort and paginate
     const sortField = order === 'desc' ? -1 : 1;
     pipeline.push({ $sort: { '_id.date': sortField } });
 
@@ -332,13 +301,6 @@ const {
   }
 
   async getTransactionStatus(customOrderId: string) {
-    // Try cache first
-    const cacheKey = `transaction:${customOrderId}`;
-    const cached = await this.cacheManager.get(cacheKey);
-    if (cached) {
-      return cached;
-    }
-
     const order = await this.orderModel.findOne({ custom_order_id: customOrderId });
 
     if (!order) {
@@ -368,16 +330,12 @@ const {
       },
     };
 
-    // Cache for 1 minute
-    await this.cacheManager.set(cacheKey, response, 60);
-
     return response;
   }
 
   async getTransactionAnalytics(filters: any) {
     const pipeline: any[] = [];
 
-    // Join with order_status
     pipeline.push({
       $lookup: {
         from: 'order_status',
@@ -394,7 +352,6 @@ const {
       },
     });
 
-    // Date range filter
     if (filters.startDate || filters.endDate) {
       const dateMatch: any = {};
       if (filters.startDate) {
@@ -406,10 +363,8 @@ const {
       pipeline.push({ $match: { created_at: dateMatch } });
     }
 
-    // Analytics aggregation
     pipeline.push({
       $facet: {
-        // Daily trends
         dailyTrends: [
           {
             $group: {
@@ -424,7 +379,6 @@ const {
           { $sort: { _id: 1 } },
           { $limit: 30 },
         ],
-        // Gateway distribution
         gatewayDistribution: [
           {
             $group: {
@@ -437,7 +391,6 @@ const {
             },
           },
         ],
-        // Payment mode distribution
         paymentModes: [
           {
             $group: {
@@ -447,7 +400,6 @@ const {
             },
           },
         ],
-        // School-wise statistics
         schoolStats: [
           {
             $group: {
@@ -460,7 +412,6 @@ const {
           { $sort: { totalRevenue: -1 } },
           { $limit: 10 },
         ],
-        // Overall statistics
         overallStats: [
           {
             $group: {
@@ -496,10 +447,9 @@ const {
   }
 
   async exportTransactions(format: 'csv' | 'json' | 'pdf', filters: any) {
-    // Get transactions data
     const transactions = await this.getAllTransactions({
       ...filters,
-      limit: 10000, // Max export limit
+      limit: 10000,
     });
 
     switch (format) {
@@ -508,8 +458,7 @@ const {
       case 'json':
         return transactions.data;
       case 'pdf':
-        // ensure we return a Buffer for the PDF
-        return await this.exportAsPDF(transactions.data);
+        return this.exportAsPDF(transactions.data);
       default:
         throw new Error('Unsupported export format');
     }
@@ -520,7 +469,6 @@ const {
       return 'No data to export';
     }
 
-    // CSV headers
     const headers = [
       'Order ID',
       'Student Name',
@@ -534,7 +482,6 @@ const {
       'Created At',
     ];
 
-    // CSV rows
     const rows = data.map(item => [
       item.custom_order_id,
       item.student_info?.name || '',
@@ -548,72 +495,20 @@ const {
       item.created_at,
     ]);
 
-    // Combine headers and rows
     const csvContent = [
       headers.join(','),
-      ...rows.map(row => row.map(cell => {
-        const safe = cell === null || cell === undefined ? '' : String(cell).replace(/"/g, '""');
-        return `"${safe}"`;
-      }).join(',')),
+      ...rows.map(row => row.map(cell => `"${cell}"`).join(',')),
     ].join('\n');
 
     return csvContent;
   }
 
   private async exportAsPDF(data: any[]): Promise<Buffer> {
-    // Simple PDF generator using pdfkit
-    const doc = new PDFDocument({ size: 'A4', margin: 40 });
-    const chunks: Buffer[] = [];
-    doc.on('data', (chunk: Buffer) => chunks.push(chunk));
-    const endPromise = new Promise<Buffer>((resolve, reject) => {
-      doc.on('end', () => resolve(Buffer.concat(chunks)));
-      doc.on('error', (err) => reject(err));
-    });
-
-    doc.fontSize(16).text('Transactions Export', { align: 'center' }).moveDown(1);
-
-    if (!data || data.length === 0) {
-      doc.fontSize(12).text('No transactions found.');
-      doc.end();
-      return endPromise;
-    }
-
-    // Column headers
-    const headers = [
-      'No', 'Order ID', 'Student', 'Email', 'Amount', 'Status', 'Gateway', 'Payment Time',
-    ];
-    const headerLine = headers.join(' | ');
-    doc.fontSize(10).text(headerLine).moveDown(0.5);
-    doc.moveTo(doc.x, doc.y).lineTo(doc.page.width - doc.page.margins.right, doc.y).stroke();
-
-    for (let i = 0; i < data.length; i++) {
-      const row = data[i];
-      const line = [
-        String(i + 1),
-        row.custom_order_id || '',
-        row.student_info?.name || '',
-        row.student_info?.email || '',
-        row.order_amount ?? '',
-        row.status || '',
-        row.gateway || '',
-        row.payment_time ? new Date(row.payment_time).toLocaleString() : '',
-      ].join(' | ');
-
-      doc.fontSize(9).text(line);
-
-      // Add spacing and paginate
-      doc.moveDown(0.3);
-      if ((i + 1) % 35 === 0 && i !== data.length - 1) {
-        doc.addPage();
-      }
-    }
-
-    doc.end();
-    return endPromise;
+    throw new Error('PDF export not yet implemented');
   }
 
   private mapSortField(field: string): string {
-    const fieldMap: Record<string, string> = {
+    const fieldMap = {
       'created_at': 'created_at',
       'payment_time': 'status_info.payment_time',
       'amount': 'status_info.order_amount',

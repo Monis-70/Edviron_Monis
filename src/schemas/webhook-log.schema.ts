@@ -56,8 +56,6 @@ export class WebhookLog {
 }
 
 export const WebhookLogSchema = SchemaFactory.createForClass(WebhookLog);
-
-// Add indexes for efficient querying
 WebhookLogSchema.index({ webhook_id: 1 });
 WebhookLogSchema.index({ status: 1 });
 WebhookLogSchema.index({ created_at: -1 });

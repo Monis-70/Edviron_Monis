@@ -33,7 +33,8 @@ export abstract class BaseService<T extends Document> {
   }
 
   async delete(filter: FilterQuery<T>): Promise<T | null> {
-    return this.model.findOneAndDelete(filter).exec();
+    // return this.model.findOneAndDelete(filter).exec();
+return (await this.model.findOneAndDelete(filter).exec()) as unknown as T;
   }
 
   async count(filter: FilterQuery<T> = {}): Promise<number> {

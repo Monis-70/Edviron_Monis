@@ -1,13 +1,23 @@
-import { IsOptional, IsEnum, IsString, IsDateString, IsNumber } from 'class-validator';
+import { IsOptional, IsNumber, IsString, IsEnum, IsDateString, Min, Max } from 'class-validator';
+import { Type } from 'class-transformer';
 
 export class TransactionFiltersDto {
   @IsOptional()
-  @IsEnum(['pending', 'processing', 'success', 'failed', 'cancelled'])
-  status?: string;
+  @Type(() => Number)
+  @IsNumber()
+  @Min(1)
+  page?: number = 1;
 
   @IsOptional()
-  @IsString()
-  gateway?: string;
+  @Type(() => Number)
+  @IsNumber()
+  @Min(1)
+  @Max(100)
+  limit?: number = 10;
+
+  @IsOptional()
+  @IsEnum(['pending', 'processing', 'success', 'failed', 'cancelled'])
+  status?: string;
 
   @IsOptional()
   @IsDateString()
@@ -17,20 +27,11 @@ export class TransactionFiltersDto {
   @IsDateString()
   endDate?: string;
 
-  // New optional fields for pagination & sorting
-  @IsOptional()
-  @IsNumber()
-  page?: number;
-
-  @IsOptional()
-  @IsNumber()
-  limit?: number;
-
   @IsOptional()
   @IsString()
-  sort?: string; // e.g., 'created_at', 'amount'
+  sort?: string = 'created_at';
 
   @IsOptional()
   @IsEnum(['asc', 'desc'])
-  order?: 'asc' | 'desc';
+  order?: 'asc' | 'desc' = 'desc';
 }
