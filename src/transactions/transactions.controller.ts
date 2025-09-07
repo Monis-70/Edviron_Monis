@@ -34,7 +34,7 @@ export class TransactionsController {
 
   @Get('transaction-status/:customOrderId')
   @UseGuards(JwtAuthGuard)
-  async getTransactionStatus(@Param('customOrderId') customOrderId: string) {
+  async getTransactionStatu(@Param('customOrderId') customOrderId: string) {
     return this.transactionsService.getTransactionStatus(customOrderId);
   }
 

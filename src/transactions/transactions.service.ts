@@ -300,38 +300,42 @@ export class TransactionsService {
     };
   }
 
-  async getTransactionStatus(customOrderId: string) {
-    const order = await this.orderModel.findOne({ custom_order_id: customOrderId });
+async getTransactionStatus(customOrderId: string) {
+  const order = await this.orderModel.findOne({ custom_order_id: customOrderId });
 
-    if (!order) {
-      throw new NotFoundException('Transaction not found');
-    }
-
-    const orderStatus = await this.orderStatusModel.findOne({ 
-      collect_id: order._id 
-    });
-
-    const response = {
-      success: true,
-      transaction: {
-        customOrderId: order.custom_order_id,
-        schoolId: order.school_id,
-        studentInfo: order.student_info,
-        gateway: order.gateway_name,
-        createdAt: order.created_at,
-        status: orderStatus?.status || 'pending',
-        amount: orderStatus?.order_amount || 0,
-        transactionAmount: orderStatus?.transaction_amount || 0,
-        paymentMode: orderStatus?.payment_mode || null,
-        paymentTime: orderStatus?.payment_time || null,
-        bankReference: orderStatus?.bank_reference || null,
-        paymentMessage: orderStatus?.payment_message || null,
-        errorMessage: orderStatus?.error_message || null,
-      },
-    };
-
-    return response;
+  if (!order) {
+    throw new NotFoundException('Transaction not found');
   }
+
+  const orderStatus = await this.orderStatusModel.findOne({ 
+    collect_id: order._id 
+  });
+
+const response = {
+  success: true,
+  transaction: {
+    custom_order_id: order._id.toString(),
+    school_id: order.school_id,
+    student_info: order.student_info,
+    gateway_name: order.gateway_name,
+    amount: order.amount,
+    created_at: order.createdAt, // Mongoose timestamp
+    status: orderStatus?.status || 'pending',
+    order_amount: orderStatus?.order_amount || 0,
+    transaction_amount: orderStatus?.transaction_amount || 0,
+    payment_mode: orderStatus?.payment_mode || null,
+    payment_time: orderStatus?.payment_time || null,
+    bank_reference: orderStatus?.bank_reference || null,
+    payment_message: orderStatus?.payment_message || null,
+    error_message: orderStatus?.error_message || null,
+  },
+};
+
+
+
+  return response;
+}
+
 
   async getTransactionAnalytics(filters: any) {
     const pipeline: any[] = [];

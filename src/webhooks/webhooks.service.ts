@@ -17,56 +17,7 @@ export class WebhooksService {
     @InjectModel(OrderStatus.name) private orderStatusModel: Model<OrderStatusDocument>,
   ) {}
 
-  async processWebhook(
-    payload: WebhookPayloadDto,
-    headers: any,
-    ip: string,
-  ): Promise<any> {
-    const startTime = Date.now();
-    const webhookId = `WH_${Date.now()}_${uuidv4().slice(0, 8)}`;
 
-    const webhookLog = await this.webhookLogModel.create({
-      webhook_id: webhookId,
-      event_type: 'payment_update',
-      payload,
-      headers,
-      ip_address: ip,
-      user_agent: headers['user-agent'] || 'unknown',
-      status: 'processing',
-    });
-
-    try {
-      this.validateWebhookPayload(payload);
-      const result = await this.updatePaymentStatus(payload.order_info);
-
-      const processingTime = Date.now() - startTime;
-      await this.webhookLogModel.findByIdAndUpdate(webhookLog._id, {
-        status: 'processed',
-        processed_at: new Date(),
-        processing_time_ms: processingTime,
-        response: result,
-        related_order_id: result.orderId,
-      });
-
-      this.logger.log(`Webhook processed successfully: ${webhookId}`);
-
-      return {
-        success: true,
-        webhookId,
-        message: 'Webhook processed successfully',
-        processingTime: `${processingTime}ms`,
-      };
-    } catch (error) {
-      await this.webhookLogModel.findByIdAndUpdate(webhookLog._id, {
-        status: 'failed',
-        error_message: error.message,
-        processing_time_ms: Date.now() - startTime,
-      });
-
-      this.logger.error(`Webhook processing failed: ${error.message}`);
-      throw new BadRequestException(error.message);
-    }
-  }
 
   private validateWebhookPayload(payload: WebhookPayloadDto) {
     if (!payload.order_info) {
@@ -82,67 +33,160 @@ export class WebhooksService {
     }
   }
 
-  private async updatePaymentStatus(orderInfo: any) {
-    try {
-      const order = await this.orderModel.findOne({
-        $or: [
-          { _id: orderInfo.order_id },
-          { custom_order_id: orderInfo.order_id },
-        ],
-      });
+ async processWebhook(
+  payload: any, // Changed from WebhookPayloadDto to any for flexibility
+  headers: any,
+  ip: string,
+): Promise<any> {
+  const startTime = Date.now();
+  const webhookId = `WH_${Date.now()}_${uuidv4().slice(0, 8)}`;
 
-      if (!order) {
-        throw new Error(`Order not found: ${orderInfo.order_id}`);
-      }
+  // Create webhook log entry
+  const webhookLog = await this.webhookLogModel.create({
+    webhook_id: webhookId,
+    event_type: 'payment_update',
+    payload,
+    headers,
+    ip_address: ip,
+    user_agent: headers['user-agent'] || 'unknown',
+    status: 'processing',
+  });
 
-      let orderStatus = await this.orderStatusModel.findOne({
-        collect_id: order._id,
-      });
-
-      const statusData = {
-        collect_id: order._id,
-        order_amount: orderInfo.order_amount,
-        transaction_amount: orderInfo.transaction_amount,
-        payment_mode: orderInfo.payment_mode || 'unknown',
-        payment_details: orderInfo.payemnt_details || orderInfo.payment_details || '',
-        bank_reference: orderInfo.bank_reference || '',
-        payment_message: orderInfo.Payment_message || orderInfo.payment_message || '',
-        status: this.mapPaymentStatus(orderInfo.status),
-        error_message: orderInfo.error_message || 'NA',
-        payment_time: new Date(orderInfo.payment_time),
+  try {
+    // Handle Edviron webhook format
+    let orderInfo: any;
+    
+    // Check if it's Edviron webhook format
+    if (payload.collect_request_id || payload.order_id) {
+      // Convert Edviron format to our format
+      orderInfo = {
+        order_id: payload.collect_request_id || payload.order_id,
+        order_amount: payload.amount,
+        transaction_amount: payload.amount,
+        gateway: payload.gateway || 'PhonePe',
+        status: payload.status || 'pending',
+        payment_mode: payload.payment_method || 'unknown',
+        payment_time: payload.payment_time || new Date().toISOString(),
+        bank_reference: payload.transaction_id || '',
+        Payment_message: payload.message || '',
+        error_message: payload.error || 'NA',
       };
-
-      if (orderStatus) {
-        orderStatus = await this.orderStatusModel.findByIdAndUpdate(
-          orderStatus._id,
-          statusData,
-          { new: true },
-        );
-      } else {
-        orderStatus = await this.orderStatusModel.create(statusData);
-      }
-
-      await this.orderModel.findByIdAndUpdate(order._id, {
-        $set: {
-          'metadata.lastWebhookUpdate': new Date(),
-          'metadata.paymentStatus': statusData.status,
-          'metadata.bankReference': orderInfo.bank_reference,
-        },
-      });
-
-      this.logger.log(`Payment status updated for order: ${order.custom_order_id}`);
-
-      return {
-        orderId: order._id,
-        customOrderId: order.custom_order_id,
-        status: statusData.status,
-        previousStatus: orderStatus?.status,
-      };
-    } catch (error) {
-      this.logger.error('Error updating payment status:', error);
-      throw error;
+    } else if (payload.order_info) {
+      // Original format
+      orderInfo = payload.order_info;
+    } else {
+      throw new Error('Invalid webhook payload format');
     }
+
+    // Process the payment update
+    const result = await this.updatePaymentStatus(orderInfo);
+
+    // Update webhook log with success
+    const processingTime = Date.now() - startTime;
+    await this.webhookLogModel.findByIdAndUpdate(webhookLog._id, {
+      status: 'processed',
+      processed_at: new Date(),
+      processing_time_ms: processingTime,
+      response: result,
+      related_order_id: result.orderId,
+    });
+
+    this.logger.log(`Webhook processed successfully: ${webhookId}`);
+
+    return {
+      success: true,
+      webhookId,
+      message: 'Webhook processed successfully',
+      processingTime: `${processingTime}ms`,
+    };
+  } catch (error) {
+    // Update webhook log with error
+    await this.webhookLogModel.findByIdAndUpdate(webhookLog._id, {
+      status: 'failed',
+      error_message: error.message,
+      processing_time_ms: Date.now() - startTime,
+    });
+
+    this.logger.error(`Webhook processing failed: ${error.message}`);
+    // Don't throw error for webhook, just log it
+    return {
+      success: false,
+      webhookId,
+      message: error.message,
+    };
   }
+}
+
+private async updatePaymentStatus(orderInfo: any) {
+  try {
+    // Find order by collect_request_id from metadata or custom_order_id
+    const order = await this.orderModel.findOne({
+      $or: [
+        { 'metadata.collectRequestId': orderInfo.order_id },
+        { custom_order_id: orderInfo.order_id },
+        { _id: orderInfo.order_id },
+      ],
+    });
+
+    if (!order) {
+      // Log but don't fail - webhook might arrive before we save the order
+      this.logger.warn(`Order not found for webhook: ${orderInfo.order_id}`);
+      return {
+        orderId: orderInfo.order_id,
+        status: 'order_not_found',
+        message: 'Order not found, webhook data saved',
+      };
+    }
+
+    // Rest of the update logic remains the same...
+    let orderStatus = await this.orderStatusModel.findOne({
+      collect_id: order._id,
+    });
+
+    const statusData = {
+      collect_id: order._id,
+      order_amount: orderInfo.order_amount || orderInfo.amount,
+      transaction_amount: orderInfo.transaction_amount || orderInfo.amount,
+      payment_mode: orderInfo.payment_mode || 'unknown',
+      payment_details: orderInfo.payemnt_details || orderInfo.payment_details || '',
+      bank_reference: orderInfo.bank_reference || '',
+      payment_message: orderInfo.Payment_message || orderInfo.payment_message || '',
+      status: this.mapPaymentStatus(orderInfo.status),
+      error_message: orderInfo.error_message || 'NA',
+      payment_time: new Date(orderInfo.payment_time || Date.now()),
+    };
+
+    if (orderStatus) {
+      orderStatus = await this.orderStatusModel.findByIdAndUpdate(
+        orderStatus._id,
+        statusData,
+        { new: true },
+      );
+    } else {
+      orderStatus = await this.orderStatusModel.create(statusData);
+    }
+
+    await this.orderModel.findByIdAndUpdate(order._id, {
+      $set: {
+        'metadata.lastWebhookUpdate': new Date(),
+        'metadata.paymentStatus': statusData.status,
+        'metadata.bankReference': orderInfo.bank_reference,
+      },
+    });
+
+    this.logger.log(`Payment status updated for order: ${order._id.toString()}`);
+
+return {
+  orderId: order._id,
+  customOrderId: order._id.toString(), // convert ObjectId to string if needed
+  status: statusData.status,
+  previousStatus: orderStatus?.status,
+};
+  } catch (error) {
+    this.logger.error('Error updating payment status:', error);
+    throw error;
+  }
+}
 
   private mapPaymentStatus(gatewayStatus: string): string {
     const statusMap = {

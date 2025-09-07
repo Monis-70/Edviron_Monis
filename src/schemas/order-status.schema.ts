@@ -3,53 +3,42 @@ import { Document, Types } from 'mongoose';
 
 export type OrderStatusDocument = OrderStatus & Document;
 
-@Schema({
-  timestamps: true,
-  collection: 'order_status',
-})
+@Schema({ timestamps: true })
 export class OrderStatus {
-  @Prop({ type: Types.ObjectId, ref: 'Order', required: true })
+  @Prop({ type: Types.ObjectId, ref: 'Order', required: true, index: true })
   collect_id: Types.ObjectId;
 
-  @Prop({ required: true })
+  @Prop({ type: Number, required: true })
   order_amount: number;
 
-  @Prop({ required: true })
+  @Prop({ type: Number, required: true })
   transaction_amount: number;
 
-  @Prop({ required: true })
+  @Prop({ type: String, required: true })
   payment_mode: string;
 
-  @Prop()
+  @Prop({ type: String, required: true })
   payment_details: string;
 
-  @Prop()
+  @Prop({ type: String, required: true })
   bank_reference: string;
 
-  @Prop()
+  @Prop({ type: String, required: true })
   payment_message: string;
 
-  @Prop({ 
-    required: true, 
-    enum: ['pending', 'processing', 'success', 'failed', 'cancelled'],
-    default: 'pending'
-  })
+  @Prop({ type: String, required: true, index: true })
   status: string;
 
-  @Prop()
+  @Prop({ type: String, required: true })
   error_message: string;
 
-  @Prop()
+  @Prop({ type: Date, required: true })
   payment_time: Date;
-
-  @Prop({ default: 0 })
-  retry_count: number;
-
-  @Prop()
-  last_retry_at: Date;
 }
 
 export const OrderStatusSchema = SchemaFactory.createForClass(OrderStatus);
+
+// Add indexes for performance
 OrderStatusSchema.index({ collect_id: 1 });
 OrderStatusSchema.index({ status: 1 });
 OrderStatusSchema.index({ payment_time: -1 });
