@@ -7,6 +7,7 @@ import {
   UseGuards,
   BadRequestException,
   Logger,
+  Req,
 } from '@nestjs/common';
 import { PaymentsService } from './payments.service';
 import { CreatePaymentDto } from './dto/create-payment.dto';
@@ -14,6 +15,7 @@ import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import * as jwt from 'jsonwebtoken';
 import axios from 'axios';
+import { Request } from 'express';
 
 @Controller('payments')
 export class PaymentsController {
@@ -30,7 +32,8 @@ export class PaymentsController {
     try {
       const schoolId = process.env.SCHOOL_ID;
       const callbackUrl =
-        createPaymentDto.returnUrl || `${process.env.FRONTEND_URL}/payments/status`;
+        createPaymentDto.returnUrl ||
+        `${process.env.FRONTEND_URL}/payments/status`;
 
       if (!process.env.PG_KEY) {
         throw new BadRequestException('Payment gateway key (PG_KEY) is missing');
@@ -77,7 +80,10 @@ export class PaymentsController {
         sign: data.sign,
       };
     } catch (error: any) {
-      this.logger.error('Payment API Error:', error.response?.data || error.message);
+      this.logger.error(
+        'Payment API Error:',
+        error.response?.data || error.message,
+      );
       throw new BadRequestException(
         error.response?.data?.message || 'Failed to create payment',
       );
@@ -94,4 +100,19 @@ export class PaymentsController {
   async getPaymentStatus(@Param('customOrderId') customOrderId: string) {
     return this.paymentsService.getPaymentStatus(customOrderId);
   }
+
+  // ✅ New webhook endpoint (added without touching existing code)
+@Post('webhook')
+async handleWebhook(@Req() req: Request) {
+  const payload = req.body;
+  this.logger.log('Webhook received:', JSON.stringify(payload));
+  // spec payload has order_info
+  const incoming = payload.order_info ?? payload;
+  const orderId = incoming.order_id || incoming.collect_request_id;
+  const status = incoming.status || payload.status || incoming.payment_status;
+  if (!orderId) throw new BadRequestException('Invalid webhook payload - missing order id');
+  await this.paymentsService.updatePaymentStatus(orderId, status, incoming);
+  // optional: log webhook into WebhookLogModel (see step 2)
+  return { success: true };
+}
 }

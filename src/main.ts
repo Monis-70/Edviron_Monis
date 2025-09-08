@@ -26,37 +26,38 @@ async function bootstrap() {
   );
 
   // CORS - Fixed configuration for production and development
-  const allowedOrigins = [
-    'https://student-frontend-aiex.vercel.app', // Production frontend (no trailing slash)
-    'http://localhost:5173', // Vite dev server
-    'http://localhost:3000', // Backup local
-    'http://localhost:4173', // Vite preview
-  ];
+const allowedOrigins = [
+  'https://student-frontend-aiex.vercel.app',
+  'http://localhost:5173',
+  'http://127.0.0.1:5173',
+  'http://localhost:3000',
+  'http://localhost:4173',
+];
 
-  app.enableCors({
-    origin: (origin, callback) => {
-      // Allow requests with no origin (mobile apps, postman, etc.)
-      if (!origin) return callback(null, true);
-      
-      if (allowedOrigins.includes(origin)) {
-        return callback(null, true);
-      }
-      
-      console.log('CORS blocked origin:', origin);
-      callback(new Error('Not allowed by CORS'));
-    },
-    credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-    allowedHeaders: [
-      'Content-Type', 
-      'Authorization', 
-      'X-Requested-With',
-      'Accept',
-      'Origin'
-    ],
-    exposedHeaders: ['Set-Cookie'],
-    optionsSuccessStatus: 200, // Some legacy browsers choke on 204
-  });
+app.enableCors({
+  origin: (origin, callback) => {
+    if (!origin) return callback(null, true);
+
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+
+    console.log('❌ CORS blocked origin:', origin);
+    return callback(new Error(`Not allowed by CORS: ${origin}`), false);
+  },
+  credentials: true,
+  methods: 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',
+  allowedHeaders: [
+    'Content-Type',
+    'Authorization',
+    'X-Requested-With',
+    'Accept',
+    'Origin',
+  ],
+  exposedHeaders: ['Set-Cookie'],
+  optionsSuccessStatus: 200,
+});
+
 
   // Validation - Removed duplicate pipe configuration
   app.useGlobalPipes(
