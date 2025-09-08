@@ -13,13 +13,6 @@ async function bootstrap() {
   const helmetMiddleware: any = (helmetImport as any).default ?? helmetImport;
   app.use(helmetMiddleware());
 
-    app.useGlobalPipes(
-    new ValidationPipe({
-      whitelist: true,   // strips unknown properties
-      transform: true,   // auto-transform payloads (e.g., "5000" → 5000 for @IsNumber)
-    }),
-  );
-
   // Compression
   app.use(compression());
 
@@ -32,14 +25,40 @@ async function bootstrap() {
     }),
   );
 
-  // CORS - single source of truth for frontend origin
-  const frontendOrigin =  'https://student-frontend-aiex.vercel.app/';
+  // CORS - Fixed configuration for production and development
+  const allowedOrigins = [
+    'https://student-frontend-aiex.vercel.app', // Production frontend (no trailing slash)
+    'http://localhost:5173', // Vite dev server
+    'http://localhost:3000', // Backup local
+    'http://localhost:4173', // Vite preview
+  ];
+
   app.enableCors({
-    origin: frontendOrigin,
+    origin: (origin, callback) => {
+      // Allow requests with no origin (mobile apps, postman, etc.)
+      if (!origin) return callback(null, true);
+      
+      if (allowedOrigins.includes(origin)) {
+        return callback(null, true);
+      }
+      
+      console.log('CORS blocked origin:', origin);
+      callback(new Error('Not allowed by CORS'));
+    },
     credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+    allowedHeaders: [
+      'Content-Type', 
+      'Authorization', 
+      'X-Requested-With',
+      'Accept',
+      'Origin'
+    ],
+    exposedHeaders: ['Set-Cookie'],
+    optionsSuccessStatus: 200, // Some legacy browsers choke on 204
   });
 
-  // Validation
+  // Validation - Removed duplicate pipe configuration
   app.useGlobalPipes(
     new ValidationPipe({
       whitelist: true,
@@ -67,6 +86,7 @@ async function bootstrap() {
   await app.listen(port);
   console.log(`Application is running on: http://localhost:${port}`);
   console.log(`API Documentation: http://localhost:${port}/api-docs`);
+  console.log('Allowed CORS origins:', allowedOrigins);
 }
 
 bootstrap();
