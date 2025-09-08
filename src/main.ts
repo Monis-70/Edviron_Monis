@@ -33,7 +33,7 @@ async function bootstrap() {
   );
 
   // CORS - single source of truth for frontend origin
-  const frontendOrigin =  'http://localhost:5173';
+  const frontendOrigin =  'https://student-frontend-aiex.vercel.app/';
   app.enableCors({
     origin: frontendOrigin,
     credentials: true,
