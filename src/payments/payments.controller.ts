@@ -28,7 +28,6 @@ export class PaymentsController {
     @CurrentUser() user: any,
   ) {
     try {
-      // Add school_id from env and generate JWT sign
       const schoolId = process.env.SCHOOL_ID;
       const callbackUrl =
         createPaymentDto.returnUrl || `${process.env.FRONTEND_URL}/payments/status`;
@@ -47,7 +46,6 @@ export class PaymentsController {
         { algorithm: 'HS256' },
       );
 
-      // Prepare payload for external payment API
       const apiPayload = {
         school_id: schoolId,
         amount: createPaymentDto.amount.toString(),
@@ -55,7 +53,6 @@ export class PaymentsController {
         sign,
       };
 
-      // Call the external payment API
       const response = await axios.post(
         'https://dev-vanilla.edviron.com/erp/create-collect-request',
         apiPayload,
@@ -71,13 +68,11 @@ export class PaymentsController {
 
       this.logger.log(`Payment initiated successfully for user ${user.userId}`);
 
-      // Optionally save order details via service
       await this.paymentsService.createPayment(createPaymentDto);
 
-      // Return response to frontend
       return {
         success: true,
-        paymentUrl: data.Collect_request_url,
+        paymentUrl: data.collect_request_url,
         orderId: data.collect_request_id,
         sign: data.sign,
       };

@@ -41,9 +41,10 @@ export class CreatePaymentDto {
   @Min(1)
   amount: number;
 
+  @IsObject()
   @ValidateNested()
   @Type(() => StudentInfoDto)
-  studentInfo: StudentInfoDto;
+  student_info: StudentInfoDto;
 
   @IsOptional()
   @IsString()
@@ -53,6 +54,11 @@ export class CreatePaymentDto {
   @IsString()
   description?: string;
 
+
+    @IsString()
+  @IsOptional()
+  trustee_id?: string;
+  
   @IsOptional()
   @IsString()
   gateway?: string;

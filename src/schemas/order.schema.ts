@@ -1,5 +1,6 @@
+// src/schemas/order.schema.ts
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
-import { Document } from 'mongoose';
+import { Document, Types } from 'mongoose';
 
 @Schema({ timestamps: true })
 export class StudentInfo {
@@ -26,6 +27,12 @@ export const StudentInfoSchema = SchemaFactory.createForClass(StudentInfo);
 
 @Schema({ timestamps: true })
 export class Order {
+  @Prop({ type: Types.ObjectId, required: true })
+  school_id: string;
+
+  @Prop({ type: Types.ObjectId })
+  trustee_id: string;
+
   @Prop({ required: true })
   amount: number;
 
@@ -48,7 +55,7 @@ export class Order {
   metadata?: Record<string, any>;
 
   @Prop()
-  school_id?: string;
+  custom_order_id?: string;
 }
 
 // 👇 add timestamps in the type
