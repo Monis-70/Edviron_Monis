@@ -15,6 +15,7 @@ import { Order, OrderDocument } from '../schemas/order.schema';
 import { OrderStatus, OrderStatusDocument } from '../schemas/order-status.schema';
 import { CreatePaymentDto } from './dto/create-payment.dto';
 
+
 @Injectable()
 export class PaymentsService {
   private readonly logger = new Logger(PaymentsService.name);
@@ -28,6 +29,18 @@ export class PaymentsService {
     private jwtService: JwtService,
   ) {}
 
+    private mapGatewayStatus(gatewayStatus: string): string {
+    switch (gatewayStatus?.toLowerCase()) {
+      case 'success':
+        return 'paid';
+      case 'failure':
+      case 'failed':
+        return 'failed';
+      case 'pending':
+      default:
+        return 'pending';
+    }
+  }
   // Create payment request
   async createPayment(createPaymentDto: CreatePaymentDto, user?: any) {
     try {
@@ -132,7 +145,7 @@ export class PaymentsService {
           order_amount: amount,
           collect_request_id: resData.collect_request_id,
           transaction_amount: amount,
-          status: 'pending',
+          status: this.mapGatewayStatus(resData.status || 'pending'),
           payment_mode: 'N/A',
           payment_details: 'payment_initiated',
           bank_reference: 'N/A',
@@ -235,4 +248,27 @@ export class PaymentsService {
       throw new BadRequestException('Failed to fetch transaction status');
     }
   }
+
+  // ✅ New method: update payment status (called by webhook)
+async updatePaymentStatus(orderId: string, status: string, details?: any) {
+  const normalized = this.mapGatewayStatus(status);
+  const update = {
+    status: normalized,
+    payment_message: details?.Payment_message || `Payment ${normalized}`,
+    transaction_amount: details?.transaction_amount ?? details?.order_amount ?? undefined,
+    bank_reference: details?.bank_reference ?? details?.bankReference ?? undefined,
+    payment_mode: details?.payment_mode ?? details?.paymentMode ?? 'N/A',
+    payment_time: details?.payment_time ?? details?.paymentTime ?? new Date(),
+    gateway_status: status, // store raw original
+    payment_details: JSON.stringify(details ?? {}),
+    error_message: details?.error_message ?? details?.errorMessage ?? 'N/A',
+  };
+  const orderStatus = await this.orderStatusModel.findOneAndUpdate(
+    { collect_request_id: orderId },
+    { $set: update },
+    { new: true, upsert: false }
+  );
+  
+}
+
 }
