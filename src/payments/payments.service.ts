@@ -15,6 +15,7 @@ import { Order, OrderDocument } from '../schemas/order.schema';
 import { OrderStatus, OrderStatusDocument } from '../schemas/order-status.schema';
 import { CreatePaymentDto } from './dto/create-payment.dto';
 
+type PaymentStatus = 'success' | 'pending' | 'failed' | 'cancelled';
 
 @Injectable()
 export class PaymentsService {
@@ -29,18 +30,23 @@ export class PaymentsService {
     private jwtService: JwtService,
   ) {}
 
-    private mapGatewayStatus(gatewayStatus: string): string {
-    switch (gatewayStatus?.toLowerCase()) {
-      case 'success':
-        return 'paid';
-      case 'failure':
-      case 'failed':
+  private mapGatewayStatus(gatewayStatus: string): PaymentStatus {
+    if (!gatewayStatus) return 'pending';
+
+    switch (gatewayStatus.toUpperCase()) {
+      case 'SUCCESS':
+        return 'success';
+      case 'PENDING':
+        return 'pending';
+      case 'FAILED':
         return 'failed';
-      case 'pending':
+      case 'USER_DROPPED':
+        return 'cancelled';
       default:
         return 'pending';
     }
   }
+
   // Create payment request
   async createPayment(createPaymentDto: CreatePaymentDto, user?: any) {
     try {
@@ -66,6 +72,7 @@ export class PaymentsService {
         },
         fee_type: feeType,
         description: description,
+        metadata: { amount },
         gateway_name: gateway || 'edviron',
         return_url: returnUrl,
         custom_order_id: customOrderId,
@@ -97,21 +104,30 @@ export class PaymentsService {
 
       try {
         // Step 4: Call external payment API with enhanced debugging
-        const apiUrl = this.configService.get('PAYMENT_API_URL') || 
-          'https://dev-vanilla.edviron.com/erp/create-collect-request';
-        
+        // build API URL robustly (handles env set to base URL OR full endpoint)
+        const apiBaseRaw = this.configService.get('PAYMENT_API_URL') || 'https://dev-vanilla.edviron.com';
+        const endpointPath = '/erp/create-collect-request';
+
+        // Normalize: remove trailing slash from apiBaseRaw
+        const apiBase = apiBaseRaw.endsWith('/') ? apiBaseRaw.slice(0, -1) : apiBaseRaw;
+
+        // If apiBase already includes the endpointPath, use it as-is, otherwise append endpointPath
+        const apiUrl = apiBase.includes(endpointPath)
+          ? apiBase
+          : apiBase + endpointPath;
+
         const apiKey = this.configService.get('API_KEY');
-        
+
         this.logger.log('=== EXTERNAL API CALL DEBUG ===');
         this.logger.log('API URL:', apiUrl);
         this.logger.log('API Key present:', apiKey ? 'Yes' : 'No');
         this.logger.log('Request payload:', JSON.stringify(requestBody, null, 2));
-        
+
         const response = await firstValueFrom(
           this.httpService.post(apiUrl, requestBody, {
             headers: {
               'Content-Type': 'application/json',
-              Authorization: `Bearer ${apiKey}`,
+              ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
             },
           }),
         );
@@ -124,11 +140,21 @@ export class PaymentsService {
         const resData = response.data;
 
         // Log specific fields we're looking for
-        this.logger.log('=== CHECKING RESPONSE FIELDS ===');
-        this.logger.log('collect_request_id:', resData.collect_request_id);
-        this.logger.log('collect_request_url:', resData.collect_request_url);
-        this.logger.log('sign:', resData.sign);
-        this.logger.log('All response keys:', Object.keys(resData));
+this.logger.log('=== CHECKING RESPONSE FIELDS ===');
+this.logger.log('collect_request_id:', resData.collect_request_id);
+this.logger.log('collect_request_url:', resData.collect_request_url);
+this.logger.log('sign:', resData.sign);
+this.logger.log('All response keys:', Object.keys(resData));
+const providerId = resData.collect_request_id || resData.collect_id;
+if (providerId) {
+  await this.orderModel.findByIdAndUpdate(order._id, {
+    $set: {
+      'metadata.collectRequestId': providerId,
+      'metadata.collect_id': providerId,
+      'metadata.providerResponse': resData, // optional, helpful for debugging
+    },
+  });
+}
 
         // Step 5: Validate external API response
         if (!resData.collect_request_url) {
@@ -140,18 +166,38 @@ export class PaymentsService {
         }
 
         // Step 6: Save order status
+        // compute resolved values before writing (prevent undefined variable errors)
+        const gatewayStatusRaw = resData.status ?? resData.payment_status ?? 'PENDING';
+        const mappedStatus = this.mapGatewayStatus(gatewayStatusRaw);
+        const resolvedAmount = parseFloat((resData.amount ?? resData.order_amount ?? 0).toString()) || 0;
+        const paymentMsg = resData.message ?? resData.payment_message ?? resData.txMsg ?? `Payment ${mappedStatus}`;
+        const errMsg = resData.error_message ?? resData.failure_reason ?? resData.error ?? 'N/A';
+        const bankRef = resData.bank_reference ?? resData.referenceId ?? resData.cf_payment_id ?? 'N/A';
+        const paymentDetails = resData.details ? JSON.stringify(resData.details) : JSON.stringify(resData);
+
+        // Step 6: Save order status (include collect_id to satisfy schema)
         await this.orderStatusModel.create({
-          collect_id: order._id,
-          order_amount: amount,
-          collect_request_id: resData.collect_request_id,
-          transaction_amount: amount,
-          status: this.mapGatewayStatus(resData.status || 'pending'),
-          payment_mode: 'N/A',
-          payment_details: 'payment_initiated',
-          bank_reference: 'N/A',
-          payment_message: 'Payment initiated',
-          error_message: 'N/A',
-          payment_time: new Date(),
+          custom_order_id: customOrderId,
+          collect_request_id: resData.collect_request_id || resData.collect_id || customOrderId,
+          collect_id: resData.collect_request_id || resData.collect_id || customOrderId,
+          order_amount: resolvedAmount,
+          transaction_amount: resolvedAmount,
+          status: mappedStatus, // use computed mappedStatus
+          payment_time: resData.payment_time ? new Date(resData.payment_time) : new Date(),
+          payment_mode: resData.payment_mode || resData.paymentMethod || 'N/A',
+
+          // required fields — always provide something (provider-specific fields if present)
+          payment_message: paymentMsg,
+          error_message: errMsg,
+          bank_reference: bankRef,
+          payment_details: paymentDetails, // store provider details for later debugging
+
+          // optional: keep original gateway status raw
+          gateway_status: gatewayStatusRaw,
+        });
+
+        await this.orderModel.findByIdAndUpdate(order._id, {
+          $set: { 'metadata.collectRequestId': resData.collect_request_id, 'metadata.collect_id': resData.collect_request_id },
         });
 
         this.logger.log('Order status saved successfully');
@@ -170,7 +216,7 @@ export class PaymentsService {
 
       } catch (error) {
         this.logger.error('=== EXTERNAL API ERROR ===');
-        
+
         if (error.response) {
           // The request was made and the server responded with a status code
           this.logger.error('Response status:', error.response.status);
@@ -183,7 +229,7 @@ export class PaymentsService {
           // Something happened in setting up the request
           this.logger.error('Request setup error:', error.message);
         }
-        
+
         throw error;
       }
 
@@ -200,25 +246,134 @@ export class PaymentsService {
   // Fetch transaction status by custom order ID
   async getPaymentStatus(customOrderId: string) {
     try {
+      this.logger.log(`Fetching payment status for ${customOrderId}`);
+
+      // 1) Try DB first (fast, avoids external calls)
       const orderStatus = await this.orderStatusModel.findOne({
-        collect_id: customOrderId,
+        $or: [
+          { custom_order_id: customOrderId },
+          { collect_id: customOrderId },
+          { collect_request_id: customOrderId },
+          { order_id: customOrderId },
+        ],
       });
-      if (!orderStatus) {
-        return { customOrderId, status: 'not_found' };
+
+      if (orderStatus) {
+        this.logger.log(`Found orderStatus in DB for ${customOrderId}`);
+        return {
+          customOrderId,
+          status: orderStatus.status || 'pending',
+          amount:
+            orderStatus.transaction_amount ??
+            orderStatus.order_amount ??
+            (orderStatus as any).amount ??
+            0,
+          orderAmount: orderStatus.order_amount ?? 0,
+          transaction_amount: orderStatus.transaction_amount ?? 0,
+          paymentMode: orderStatus.payment_mode || 'N/A',
+          paymentTime: orderStatus.payment_time || null,
+          message: orderStatus.payment_message || '',
+        };
       }
 
-      return {
-        customOrderId,
-        status: orderStatus.status,
-        orderAmount: orderStatus.order_amount,
-        transactionAmount: orderStatus.transaction_amount,
-        paymentMode: orderStatus.payment_mode,
-        paymentTime: orderStatus.payment_time,
-        bankReference: orderStatus.bank_reference,
-        paymentMessage: orderStatus.payment_message,
+      // 2) DB missing: try external payment provider API (Edviron / your gateway)
+      // Build sign (JWT) as you already do elsewhere
+      const jwtPayload = {
+        school_id: this.configService.get('SCHOOL_ID'),
+        collect_request_id: customOrderId,
       };
+
+      const sign = this.jwtService.sign(jwtPayload, {
+        secret: this.configService.get('PG_KEY'),
+        algorithm: 'HS256',
+      });
+
+      // build apiUrl for collect-request GET robustly (inside getPaymentStatus)
+      const apiBaseRaw = this.configService.get('PAYMENT_API_URL') || 'https://dev-vanilla.edviron.com';
+
+      // strip any /erp... part so we never double-append
+      const baseWithoutErp = apiBaseRaw.replace(/\/erp.*$/i, '').replace(/\/+$/, '');
+
+      // build path for collect-request
+      const collectPath = `/erp/collect-request/${customOrderId}?school_id=${this.configService.get('SCHOOL_ID')}&sign=${sign}`;
+
+      // final URL
+      const apiUrl = baseWithoutErp + collectPath;
+
+      this.logger.log(`Calling external payment API: ${apiUrl}`);
+
+      try {
+        const response = await firstValueFrom(this.httpService.get(apiUrl, {
+          headers: {
+            'Content-Type': 'application/json',
+            // Ensure API_KEY is sent as Bearer token if required by provider
+            ...(this.configService.get('API_KEY') && {
+              Authorization: `Bearer ${this.configService.get('API_KEY')}`,
+            }),
+          },
+        }));
+
+        const resData = response.data;
+        this.logger.log('External payment provider response:', JSON.stringify(resData, null, 2));
+
+        const mappedStatus = this.mapGatewayStatus(resData.status ?? resData.payment_status ?? 'PENDING');
+        const resolvedAmount = parseFloat((resData.amount ?? resData.order_amount ?? 0).toString()) || 0;
+        const paymentMsg = resData.message ?? resData.payment_message ?? `Payment ${mappedStatus}`;
+        const errMsg = resData.error_message ?? resData.failure_reason ?? 'N/A';
+        const bankRef = resData.bank_reference ?? resData.referenceId ?? resData.cf_payment_id ?? 'N/A';
+        const paymentDetails = resData.details ? JSON.stringify(resData.details) : JSON.stringify(resData);
+        const gatewayStatusRaw = resData.status ?? resData.payment_status ?? 'PENDING';
+
+        // Optionally persist a new orderStatus record if you want to cache
+        await this.orderStatusModel.create({
+          custom_order_id: customOrderId,
+          collect_request_id: resData.collect_request_id || resData.collect_id || customOrderId,
+          collect_id: resData.collect_request_id || resData.collect_id || customOrderId,
+          order_amount: resolvedAmount,
+          transaction_amount: resolvedAmount,
+          status: mappedStatus,
+          payment_time: resData.payment_time ? new Date(resData.payment_time) : new Date(),
+          payment_mode: resData.payment_mode || resData.paymentMethod || 'N/A',
+          payment_message: paymentMsg,
+          error_message: errMsg,
+          bank_reference: bankRef,
+          payment_details: paymentDetails,
+          gateway_status: gatewayStatusRaw,
+        });
+
+        return {
+          customOrderId,
+          status: mappedStatus,
+          amount: resolvedAmount,
+        };
+      } catch (externalErr: any) {
+        // If external API returns 401 like "Bearer token is missing", log it clearly
+        this.logger.error(`External API error fetching status for ${customOrderId}:`, externalErr?.response?.data || externalErr?.message || externalErr);
+
+        // If you have partial local data (order document), try to return that
+        const order = await this.orderModel.findOne({
+          $or: [
+            { 'metadata.collectRequestId': customOrderId },
+            { custom_order_id: customOrderId },
+            { _id: customOrderId },
+          ],
+        }).lean();
+
+        const fallbackAmount =
+          (order && ((order as any).amount ?? (order as any).order_amount ?? order.metadata?.amount)) ?? 0;
+
+        return {
+          customOrderId,
+          status: 'unknown',
+          amount: fallbackAmount,
+          message: externalErr?.response?.data?.message || externalErr?.message || 'Failed to fetch external status',
+        };
+      }
     } catch (error) {
-      this.logger.error('Error fetching payment status', error);
+      this.logger.error(
+        `Error fetching payment status for ${customOrderId}`,
+        error?.response?.data || error?.message || error,
+      );
       throw new BadRequestException('Failed to fetch payment status');
     }
   }
@@ -232,16 +387,24 @@ export class PaymentsService {
       if (!orderStatus) {
         return { customOrderId, status: 'not_found' };
       }
-
       return {
         customOrderId,
-        status: orderStatus.status,
-        orderAmount: orderStatus.order_amount,
-        transactionAmount: orderStatus.transaction_amount,
-        paymentMode: orderStatus.payment_mode,
+        status: orderStatus.status || 'pending',
+
+        // ✅ New unified field
+        amount:
+          orderStatus.transaction_amount ??
+          orderStatus.order_amount ??
+          0,
+
+        // ✅ Legacy fields (safe to remove later)
+        orderAmount: orderStatus.order_amount ?? 0,
+        transaction_amount: orderStatus.transaction_amount ?? 0,
+
+        paymentMode: orderStatus.payment_mode || 'N/A',
         paymentTime: orderStatus.payment_time,
-        bankReference: orderStatus.bank_reference,
-        paymentMessage: orderStatus.payment_message,
+        bankReference: orderStatus.bank_reference || 'N/A',
+        paymentMessage: orderStatus.payment_message || '',
       };
     } catch (error) {
       this.logger.error('Error fetching transaction status', error);
@@ -250,25 +413,64 @@ export class PaymentsService {
   }
 
   // ✅ New method: update payment status (called by webhook)
-async updatePaymentStatus(orderId: string, status: string, details?: any) {
-  const normalized = this.mapGatewayStatus(status);
-  const update = {
-    status: normalized,
-    payment_message: details?.Payment_message || `Payment ${normalized}`,
-    transaction_amount: details?.transaction_amount ?? details?.order_amount ?? undefined,
-    bank_reference: details?.bank_reference ?? details?.bankReference ?? undefined,
-    payment_mode: details?.payment_mode ?? details?.paymentMode ?? 'N/A',
-    payment_time: details?.payment_time ?? details?.paymentTime ?? new Date(),
-    gateway_status: status, // store raw original
-    payment_details: JSON.stringify(details ?? {}),
-    error_message: details?.error_message ?? details?.errorMessage ?? 'N/A',
-  };
-  const orderStatus = await this.orderStatusModel.findOneAndUpdate(
-    { collect_request_id: orderId },
-    { $set: update },
-    { new: true, upsert: false }
-  );
-  
-}
+  async updatePaymentStatus(orderId: string, gatewayStatus: string, details?: any) {
+    try {
+      // ✅ Normalize status
+      const normalized: PaymentStatus = this.mapGatewayStatus(gatewayStatus);
 
+      // ✅ Extract amount (Cashfree sends "orderAmount")
+      const transactionAmount =
+        details?.transaction_amount ??
+        details?.order_amount ??
+        details?.orderAmount ??
+        details?.amount ??
+        0;
+
+      // ✅ Extract payment time
+      const paymentTime =
+        details?.payment_time ??
+        details?.paymentTime ??
+        details?.txTime
+          ? new Date(details.payment_time ?? details.paymentTime ?? details.txTime)
+          : new Date();
+
+      // ✅ Extract payment method
+      const paymentMethod =
+        details?.payment_mode ??
+        details?.paymentMode ??
+        'N/A';
+
+      // ✅ Prepare update payload
+      const update: any = {
+        status: normalized, // success | pending | failed | cancelled
+        transaction_amount: transactionAmount,
+        order_amount: transactionAmount,
+        payment_time: paymentTime,
+        payment_mode: paymentMethod,
+        bank_reference: details?.referenceId ?? details?.bank_reference ?? 'N/A',
+        payment_message: details?.txMsg ?? details?.payment_message ?? `Payment ${normalized}`,
+        gateway_status: gatewayStatus,
+        payment_details: details ? JSON.stringify(details) : undefined,
+      };
+
+      const updated = await this.orderStatusModel.findOneAndUpdate(
+        {
+          $or: [
+            { custom_order_id: orderId },       // ✅ main lookup
+            { order_id: orderId },              // fallback
+            { collect_request_id: orderId },
+            { collect_id: orderId }     // gateway reference fallback
+          ]
+        },
+        { $set: update },
+        { new: true, upsert: true }
+      );
+
+      this.logger.log(`Updated payment status for ${orderId}: ${normalized}, amount: ${transactionAmount}`);
+      return updated;
+    } catch (err) {
+      this.logger.error(`Failed to update payment status for ${orderId}:`, err?.response?.data ?? err.message ?? err);
+      throw err;
+    }
+  }
 }

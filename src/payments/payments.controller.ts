@@ -16,7 +16,7 @@ import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import * as jwt from 'jsonwebtoken';
 import axios from 'axios';
 import { Request } from 'express';
-
+import { Public } from '../auth/decorators/current-user.decorator';
 @Controller('payments')
 export class PaymentsController {
   private readonly logger = new Logger(PaymentsController.name);
@@ -71,7 +71,11 @@ export class PaymentsController {
 
       this.logger.log(`Payment initiated successfully for user ${user.userId}`);
 
-      await this.paymentsService.createPayment(createPaymentDto);
+await this.paymentsService.createPayment({
+  ...createPaymentDto,
+  orderId: data.collect_request_id, // ✅ save external order ID
+});
+
 
       return {
         success: true,
@@ -95,24 +99,29 @@ export class PaymentsController {
     return this.paymentsService.collectPaymentStatus(customOrderId);
   }
 
-  @Get('status/:customOrderId')
-  @UseGuards(JwtAuthGuard)
-  async getPaymentStatus(@Param('customOrderId') customOrderId: string) {
-    return this.paymentsService.getPaymentStatus(customOrderId);
-  }
+// @UseGuards(JwtAuthGuard)
+@Public()
+@Get('status/:customOrderId')
+
+async getPaymentStatus(@Param('customOrderId') customOrderId: string) {
+  // ✅ Call the service
+  return this.paymentsService.getPaymentStatus(customOrderId);
+}
+
+
 
   // ✅ New webhook endpoint (added without touching existing code)
-@Post('webhook')
-async handleWebhook(@Req() req: Request) {
-  const payload = req.body;
-  this.logger.log('Webhook received:', JSON.stringify(payload));
-  // spec payload has order_info
-  const incoming = payload.order_info ?? payload;
-  const orderId = incoming.order_id || incoming.collect_request_id;
-  const status = incoming.status || payload.status || incoming.payment_status;
-  if (!orderId) throw new BadRequestException('Invalid webhook payload - missing order id');
-  await this.paymentsService.updatePaymentStatus(orderId, status, incoming);
-  // optional: log webhook into WebhookLogModel (see step 2)
-  return { success: true };
-}
+// @Post('webhook')
+// async handleWebhook(@Req() req: Request) {
+//   const payload = req.body;
+//   this.logger.log('Webhook received:', JSON.stringify(payload));
+//   // spec payload has order_info
+//   const incoming = payload.order_info ?? payload;
+//   const orderId = incoming.order_id || incoming.collect_request_id;
+//   const status = incoming.status || payload.status || incoming.payment_status;
+//   if (!orderId) throw new BadRequestException('Invalid webhook payload - missing order id');
+//   await this.paymentsService.updatePaymentStatus(orderId, status, incoming);
+//   // optional: log webhook into WebhookLogModel (see step 2)
+//   return { success: true };
+// }
 }

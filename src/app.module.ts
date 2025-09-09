@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { MongooseModule } from '@nestjs/mongoose';
+import { ThrottlerModule } from '@nestjs/throttler'; // ✅ added
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { AuthModule } from './auth/auth.module';
@@ -25,6 +26,12 @@ import databaseConfig from './config/database.config';
       }),
       inject: [ConfigService],
     }),
+    ThrottlerModule.forRoot([
+      {
+        ttl: 60,   // ⏱ time window in seconds
+        limit: 200 // ✅ allow 200 requests per 60s per IP
+      },
+    ]),
     AuthModule,
     PaymentsModule,
     TransactionsModule,

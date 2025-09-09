@@ -1,4 +1,11 @@
-import { IsNumber, IsObject, ValidateNested, IsString, IsOptional } from 'class-validator';
+import {
+  IsNumber,
+  IsObject,
+  ValidateNested,
+  IsString,
+  IsOptional,
+  IsDateString,
+} from 'class-validator';
 import { Type } from 'class-transformer';
 
 class OrderInfoDto {
@@ -19,14 +26,10 @@ class OrderInfoDto {
   bank_reference?: string;
 
   @IsString()
-  status: string;
+  status: string; // success | pending | failed | cancelled etc.
 
   @IsString()
   payment_mode: string;
-
-  @IsString()
-  @IsOptional()
-  payemnt_details?: string;
 
   @IsString()
   @IsOptional()
@@ -34,14 +37,10 @@ class OrderInfoDto {
 
   @IsString()
   @IsOptional()
-  Payment_message?: string;
-
-  @IsString()
-  @IsOptional()
   payment_message?: string;
 
-  @IsString()
-  payment_time: string;
+  @IsDateString()
+  payment_time: string; // ISO date string
 
   @IsString()
   @IsOptional()
@@ -50,7 +49,7 @@ class OrderInfoDto {
 
 export class WebhookPayloadDto {
   @IsNumber()
-  status: number;
+  status: number; // top-level numeric status (keep if required by your validation)
 
   @ValidateNested()
   @Type(() => OrderInfoDto)

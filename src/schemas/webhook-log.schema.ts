@@ -20,12 +20,13 @@ export class WebhookLog {
   @Prop({ type: Object })
   headers: Record<string, any>;
 
-  @Prop({ 
-    required: true,
-    enum: ['pending', 'processed', 'failed', 'retrying'],
-    default: 'pending'
-  })
-  status: string;
+@Prop({ 
+  required: true, 
+  enum: ['pending', 'processing', 'processed', 'failed', 'retrying'], 
+  default: 'pending' 
+})
+status: string;
+
 
   @Prop()
   processed_at: Date;

@@ -40,6 +40,9 @@ export class CreatePaymentDto {
   @IsNumber()
   @Min(1)
   amount: number;
+@IsOptional()
+@IsString()
+orderId?: string;
 
   @IsObject()
   @ValidateNested()
