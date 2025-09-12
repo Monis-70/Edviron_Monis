@@ -5,7 +5,7 @@ import { WebhooksService } from './webhooks.service';
 import { WebhookLog, WebhookLogSchema } from '../schemas/webhook-log.schema';
 import { Order, OrderSchema } from '../schemas/order.schema';
 import { OrderStatus, OrderStatusSchema } from '../schemas/order-status.schema';
-
+import { PaymentsModule } from '../payments/payments.module'; 
 @Module({
   imports: [
     MongooseModule.forFeature([
@@ -13,6 +13,7 @@ import { OrderStatus, OrderStatusSchema } from '../schemas/order-status.schema';
       { name: Order.name, schema: OrderSchema },
       { name: OrderStatus.name, schema: OrderStatusSchema },
     ]),
+     PaymentsModule,
   ],
   controllers: [WebhooksController],
   providers: [WebhooksService],

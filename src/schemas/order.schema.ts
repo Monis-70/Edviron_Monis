@@ -51,7 +51,8 @@ export class Order {
   @Prop()
   return_url?: string;
 
-  @Prop({ type: Object })
+  // ✅ Fix: allow any arbitrary JSON here (safe for providerResponse, etc.)
+  @Prop({ type: Object, default: {} })
   metadata?: Record<string, any>;
 
   @Prop()

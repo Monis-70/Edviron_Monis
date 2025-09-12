@@ -4,85 +4,27 @@ import {
   Get,
   Body,
   Param,
-  UseGuards,
   BadRequestException,
   Logger,
   Req,
 } from '@nestjs/common';
 import { PaymentsService } from './payments.service';
 import { CreatePaymentDto } from './dto/create-payment.dto';
-import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
-import { CurrentUser } from '../auth/decorators/current-user.decorator';
-import * as jwt from 'jsonwebtoken';
-import axios from 'axios';
 import { Request } from 'express';
 import { Public } from '../auth/decorators/current-user.decorator';
+
 @Controller('payments')
 export class PaymentsController {
   private readonly logger = new Logger(PaymentsController.name);
 
   constructor(private readonly paymentsService: PaymentsService) {}
 
+  // ✅ Create payment (delegates to service)
   @Post('create-payment')
-  @UseGuards(JwtAuthGuard)
-  async createPayment(
-    @Body() createPaymentDto: CreatePaymentDto,
-    @CurrentUser() user: any,
-  ) {
+  @Public()
+  async createPayment(@Body() createPaymentDto: CreatePaymentDto) {
     try {
-      const schoolId = process.env.SCHOOL_ID;
-      const callbackUrl =
-        createPaymentDto.returnUrl ||
-        `${process.env.FRONTEND_URL}/payments/status`;
-
-      if (!process.env.PG_KEY) {
-        throw new BadRequestException('Payment gateway key (PG_KEY) is missing');
-      }
-
-      const sign = jwt.sign(
-        {
-          school_id: schoolId,
-          amount: createPaymentDto.amount.toString(),
-          callback_url: callbackUrl,
-        },
-        process.env.PG_KEY,
-        { algorithm: 'HS256' },
-      );
-
-      const apiPayload = {
-        school_id: schoolId,
-        amount: createPaymentDto.amount.toString(),
-        callback_url: callbackUrl,
-        sign,
-      };
-
-      const response = await axios.post(
-        'https://dev-vanilla.edviron.com/erp/create-collect-request',
-        apiPayload,
-        {
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${process.env.API_KEY}`,
-          },
-        },
-      );
-
-      const data = response.data;
-
-      this.logger.log(`Payment initiated successfully for user ${user.userId}`);
-
-await this.paymentsService.createPayment({
-  ...createPaymentDto,
-  orderId: data.collect_request_id, // ✅ save external order ID
-});
-
-
-      return {
-        success: true,
-        paymentUrl: data.collect_request_url,
-        orderId: data.collect_request_id,
-        sign: data.sign,
-      };
+      return await this.paymentsService.createPayment(createPaymentDto);
     } catch (error: any) {
       this.logger.error(
         'Payment API Error:',
@@ -99,29 +41,60 @@ await this.paymentsService.createPayment({
     return this.paymentsService.collectPaymentStatus(customOrderId);
   }
 
-// @UseGuards(JwtAuthGuard)
-@Public()
-@Get('status/:customOrderId')
+  @Get('status/:customOrderId')
+  @Public()
+  async getPaymentStatus(@Param('customOrderId') customOrderId: string) {
+    return this.paymentsService.getPaymentStatus(customOrderId);
+  }
 
-async getPaymentStatus(@Param('customOrderId') customOrderId: string) {
-  // ✅ Call the service
-  return this.paymentsService.getPaymentStatus(customOrderId);
-}
+  @Post('webhook')
+  async handleWebhook(@Req() req: Request) {
+    const payload = req.body;
+    this.logger.log('Webhook received:', JSON.stringify(payload));
 
+    const incoming = payload.order_info ?? payload;
+    const orderId =
+      incoming.order_id ||
+      incoming.collect_request_id ||
+      incoming.custom_order_id;
 
+    if (!orderId) {
+      throw new BadRequestException('Invalid webhook payload - missing order id');
+    }
 
-  // ✅ New webhook endpoint (added without touching existing code)
-// @Post('webhook')
-// async handleWebhook(@Req() req: Request) {
-//   const payload = req.body;
-//   this.logger.log('Webhook received:', JSON.stringify(payload));
-//   // spec payload has order_info
-//   const incoming = payload.order_info ?? payload;
-//   const orderId = incoming.order_id || incoming.collect_request_id;
-//   const status = incoming.status || payload.status || incoming.payment_status;
-//   if (!orderId) throw new BadRequestException('Invalid webhook payload - missing order id');
-//   await this.paymentsService.updatePaymentStatus(orderId, status, incoming);
-//   // optional: log webhook into WebhookLogModel (see step 2)
-//   return { success: true };
-// }
+    // Normalize status
+    const status =
+      incoming.status || payload.status || incoming.payment_status || 'PENDING';
+
+    // Call service update
+    const updated = await this.paymentsService.updatePaymentStatus(
+      orderId,
+      status,
+      incoming,
+    );
+
+    // If updatePaymentStatus returned null → order not found
+    if (!updated) {
+      return {
+        success: false,
+        message: 'Order not found',
+        orderId,
+      };
+    }
+
+    return {
+      success: true,
+      order: {
+        orderId: updated._id?.toString() ?? orderId, // Mongo _id
+        custom_order_id: updated.custom_order_id ?? orderId, // internal ID
+        provider_collect_id: updated.provider_collect_id ?? null, // external gateway ID
+        status: updated.status,
+        amount: updated.transaction_amount ?? updated.order_amount ?? 0,
+        paymentMode: updated.payment_mode ?? 'N/A',
+        bankReference: updated.bank_reference ?? 'N/A',
+        paymentMessage: updated.payment_message ?? '',
+        paymentTime: updated.payment_time ?? new Date(),
+      },
+    };
+  }
 }

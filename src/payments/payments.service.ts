@@ -30,23 +30,33 @@ export class PaymentsService {
     private jwtService: JwtService,
   ) {}
 
-  private mapGatewayStatus(gatewayStatus: string): PaymentStatus {
-    if (!gatewayStatus) return 'pending';
+private mapGatewayStatus(gatewayStatus: string, captureStatusRaw?: string): PaymentStatus {
+  if (!gatewayStatus) return 'pending';
+  const normalized = gatewayStatus.toUpperCase();
+  const capture = captureStatusRaw?.toUpperCase();
 
-    switch (gatewayStatus.toUpperCase()) {
-      case 'SUCCESS':
-        return 'success';
-      case 'PENDING':
-        return 'pending';
-      case 'FAILED':
-        return 'failed';
-      case 'USER_DROPPED':
-        return 'cancelled';
-      default:
-        return 'pending';
-    }
+  // ✅ Cashfree quirk
+  if (normalized === 'SUCCESS' && capture === 'PENDING') {
+    return 'pending';
   }
 
+  switch (normalized) {
+    case 'SUCCESS':
+    case 'COMPLETED':
+    case 'PAID':
+      return 'success';
+    case 'FAILED':
+    case 'DECLINED':
+    case 'ERROR':
+      return 'failed';
+    case 'USER_DROPPED':
+    case 'CANCELLED':
+    case 'CANCELED':
+      return 'cancelled';
+    default:
+      return 'pending';
+  }
+}
   // Create payment request
   async createPayment(createPaymentDto: CreatePaymentDto, user?: any) {
     try {
@@ -72,9 +82,15 @@ export class PaymentsService {
         },
         fee_type: feeType,
         description: description,
-        metadata: { amount },
+        order_id: customOrderId, 
+        metadata: { 
+  amount,
+  collectRequestId: customOrderId, // 👈 init with same ID
+  collect_id: customOrderId        // 👈 init with same ID
+},
         gateway_name: gateway || 'edviron',
         return_url: returnUrl,
+        
         custom_order_id: customOrderId,
       });
 
@@ -101,6 +117,10 @@ export class PaymentsService {
       });
 
       const requestBody = { ...payload, sign };
+
+
+
+      
 
       try {
         // Step 4: Call external payment API with enhanced debugging
@@ -147,13 +167,16 @@ this.logger.log('sign:', resData.sign);
 this.logger.log('All response keys:', Object.keys(resData));
 const providerId = resData.collect_request_id || resData.collect_id;
 if (providerId) {
-  await this.orderModel.findByIdAndUpdate(order._id, {
-    $set: {
-      'metadata.collectRequestId': providerId,
-      'metadata.collect_id': providerId,
-      'metadata.providerResponse': resData, // optional, helpful for debugging
-    },
-  });
+await this.orderModel.findByIdAndUpdate(order._id, {
+  $set: {
+    'metadata.collectRequestId': providerId,
+    'metadata.collect_id': providerId,
+    'metadata.providerResponse': resData,
+    order_id: providerId,
+   // custom_order_id: providerId,
+  },
+});
+
 }
 
         // Step 5: Validate external API response
@@ -167,9 +190,31 @@ if (providerId) {
 
         // Step 6: Save order status
         // compute resolved values before writing (prevent undefined variable errors)
-        const gatewayStatusRaw = resData.status ?? resData.payment_status ?? 'PENDING';
-        const mappedStatus = this.mapGatewayStatus(gatewayStatusRaw);
-        const resolvedAmount = parseFloat((resData.amount ?? resData.order_amount ?? 0).toString()) || 0;
+const gatewayStatusRaw = resData.status ?? resData.payment_status ?? 'PENDING';
+const captureStatusRaw = resData.capture_status ?? resData.txStatus; // ✅ add this
+const mappedStatus = this.mapGatewayStatus(gatewayStatusRaw)
+
+let resolvedAmount = parseFloat(
+  (resData.amount ?? resData.am ?? resData.order_amount ?? 0).toString()
+) || 0;
+
+
+
+// ✅ Fallback: parse from collect_request_url if missing
+if ((!resolvedAmount || isNaN(resolvedAmount)) && resData.collect_request_url) {
+  try {
+    const url = new URL(resData.collect_request_url);
+    const amt = url.searchParams.get("amount");
+    if (amt) {
+      resolvedAmount = parseFloat(amt);
+      this.logger.log("✅ Parsed amount from collect_request_url -> " + resolvedAmount);
+    }
+  } catch (e) {
+    this.logger.warn("⚠️ Failed to parse amount from collect_request_url", e);
+  }
+}
+
+
         const paymentMsg = resData.message ?? resData.payment_message ?? resData.txMsg ?? `Payment ${mappedStatus}`;
         const errMsg = resData.error_message ?? resData.failure_reason ?? resData.error ?? 'N/A';
         const bankRef = resData.bank_reference ?? resData.referenceId ?? resData.cf_payment_id ?? 'N/A';
@@ -179,9 +224,11 @@ if (providerId) {
         await this.orderStatusModel.create({
           custom_order_id: customOrderId,
           collect_request_id: resData.collect_request_id || resData.collect_id || customOrderId,
-          collect_id: resData.collect_request_id || resData.collect_id || customOrderId,
+          collect_id: order?._id || new Types.ObjectId(),  // always Order reference
+  provider_collect_id: resData.collect_request_id || resData.collect_id || customOrderId, // store gateway id separately
           order_amount: resolvedAmount,
           transaction_amount: resolvedAmount,
+          
           status: mappedStatus, // use computed mappedStatus
           payment_time: resData.payment_time ? new Date(resData.payment_time) : new Date(),
           payment_mode: resData.payment_mode || resData.paymentMethod || 'N/A',
@@ -200,7 +247,9 @@ if (providerId) {
           $set: { 'metadata.collectRequestId': resData.collect_request_id, 'metadata.collect_id': resData.collect_request_id },
         });
 
-        this.logger.log('Order status saved successfully');
+          this.logger.log(
+    `Mapped provider collect_request_id=${providerId} to local order _id=${order._id}`
+  );
 
         // Step 7: Return response
         const result = {
@@ -249,32 +298,49 @@ if (providerId) {
       this.logger.log(`Fetching payment status for ${customOrderId}`);
 
       // 1) Try DB first (fast, avoids external calls)
-      const orderStatus = await this.orderStatusModel.findOne({
-        $or: [
-          { custom_order_id: customOrderId },
-          { collect_id: customOrderId },
-          { collect_request_id: customOrderId },
-          { order_id: customOrderId },
-        ],
-      });
+const searchConditions: Record<string, any>[] = [
+  { custom_order_id: customOrderId },
+  { 'metadata.collectRequestId': customOrderId },
+  { 'metadata.collect_id': customOrderId },
+  { order_id: customOrderId },
+   { provider_collect_id: customOrderId },
+];
+const order = await this.orderModel.findOne({ $or: searchConditions }).lean();
 
-      if (orderStatus) {
-        this.logger.log(`Found orderStatus in DB for ${customOrderId}`);
-        return {
-          customOrderId,
-          status: orderStatus.status || 'pending',
-          amount:
-            orderStatus.transaction_amount ??
-            orderStatus.order_amount ??
-            (orderStatus as any).amount ??
-            0,
-          orderAmount: orderStatus.order_amount ?? 0,
-          transaction_amount: orderStatus.transaction_amount ?? 0,
-          paymentMode: orderStatus.payment_mode || 'N/A',
-          paymentTime: orderStatus.payment_time || null,
-          message: orderStatus.payment_message || '',
-        };
-      }
+if (Types.ObjectId.isValid(customOrderId)) {
+  searchConditions.push({ _id: new Types.ObjectId(customOrderId) });
+}
+
+this.logger.debug(
+  `getPaymentStatus() searching with conditions:\n${JSON.stringify(searchConditions, null, 2)}`
+);
+
+const orderStatus = await this.orderStatusModel.findOne({ $or: searchConditions });
+//const order = await this.orderModel.findOne({ $or: searchConditions }).lean();
+
+if (!order && !orderStatus) {
+  this.logger.warn(`getPaymentStatus(): No matching order found for ${customOrderId}`);
+}
+
+
+// in getPaymentStatus()
+if (orderStatus) {
+  // if DB says pending but gateway says SUCCESS, prefer gateway
+  const normalized = this.mapGatewayStatus(
+    orderStatus.gateway_status,
+    orderStatus.capture_status,
+  );
+
+  return {
+    custom_order_id: order.custom_order_id,
+    provider_collect_id: orderStatus?.provider_collect_id || null,
+    status: normalized, // ✅ always normalized
+    amount: orderStatus.transaction_amount ?? orderStatus.order_amount ?? order.amount ?? 0,
+    payment_time: orderStatus.payment_time || null,
+    payment_mode: orderStatus.payment_mode || 'N/A',
+  };
+}
+
 
       // 2) DB missing: try external payment provider API (Edviron / your gateway)
       // Build sign (JWT) as you already do elsewhere
@@ -315,30 +381,55 @@ if (providerId) {
 
         const resData = response.data;
         this.logger.log('External payment provider response:', JSON.stringify(resData, null, 2));
+      const gatewayStatusRaw = resData.status ?? resData.payment_status ?? 'PENDING';
+       const captureStatusRaw = resData.capture_status ?? resData.txStatus; // ✅ add this
+        const mappedStatus = this.mapGatewayStatus(gatewayStatusRaw)
+// ✅ Step: Resolve amount safely
+let resolvedAmount = parseFloat(
+  (resData.amount ?? resData.am ?? resData.order_amount ?? 0).toString()
+) || 0;
 
-        const mappedStatus = this.mapGatewayStatus(resData.status ?? resData.payment_status ?? 'PENDING');
-        const resolvedAmount = parseFloat((resData.amount ?? resData.order_amount ?? 0).toString()) || 0;
+
+// ✅ Fallback: if API didn’t send numeric amount, parse from collect_request_url
+if ((resolvedAmount === 0 || isNaN(resolvedAmount)) && resData.collect_request_url) {
+  try {
+    const url = new URL(resData.collect_request_url);
+    const amt = url.searchParams.get('amount');
+    if (amt) {
+      resolvedAmount = parseFloat(amt);
+      this.logger.log(`Parsed amount from collect_request_url: ${resolvedAmount}`);
+    }
+  } catch (e) {
+    this.logger.warn('Failed to parse amount from collect_request_url', e.message);
+  }
+}
+
+
         const paymentMsg = resData.message ?? resData.payment_message ?? `Payment ${mappedStatus}`;
         const errMsg = resData.error_message ?? resData.failure_reason ?? 'N/A';
         const bankRef = resData.bank_reference ?? resData.referenceId ?? resData.cf_payment_id ?? 'N/A';
         const paymentDetails = resData.details ? JSON.stringify(resData.details) : JSON.stringify(resData);
-        const gatewayStatusRaw = resData.status ?? resData.payment_status ?? 'PENDING';
+    
+
 
         // Optionally persist a new orderStatus record if you want to cache
         await this.orderStatusModel.create({
           custom_order_id: customOrderId,
           collect_request_id: resData.collect_request_id || resData.collect_id || customOrderId,
-          collect_id: resData.collect_request_id || resData.collect_id || customOrderId,
+          collect_id: order?._id || new Types.ObjectId(),  // always Order reference
+  provider_collect_id: resData.collect_request_id || resData.collect_id || customOrderId, // store gateway id separately
           order_amount: resolvedAmount,
           transaction_amount: resolvedAmount,
           status: mappedStatus,
           payment_time: resData.payment_time ? new Date(resData.payment_time) : new Date(),
           payment_mode: resData.payment_mode || resData.paymentMethod || 'N/A',
           payment_message: paymentMsg,
+          
           error_message: errMsg,
           bank_reference: bankRef,
           payment_details: paymentDetails,
           gateway_status: gatewayStatusRaw,
+          capture_status: captureStatusRaw,
         });
 
         return {
@@ -355,7 +446,9 @@ if (providerId) {
           $or: [
             { 'metadata.collectRequestId': customOrderId },
             { custom_order_id: customOrderId },
+            { order_id: customOrderId }, 
             { _id: customOrderId },
+            
           ],
         }).lean();
 
@@ -379,98 +472,242 @@ if (providerId) {
   }
 
   // Fetch transaction details for collect-payment route
-  async collectPaymentStatus(customOrderId: string) {
-    try {
-      const orderStatus = await this.orderStatusModel.findOne({
-        collect_id: customOrderId,
-      });
-      if (!orderStatus) {
-        return { customOrderId, status: 'not_found' };
-      }
-      return {
-        customOrderId,
-        status: orderStatus.status || 'pending',
+async collectPaymentStatus(customOrderId: string) {
+  try {
+   const orderStatus = await this.orderStatusModel.findOne({
+  $or: [
+    { collect_id: new Types.ObjectId(customOrderId) },  // ✅ if valid ObjectId
+    { provider_collect_id: customOrderId },
+    { custom_order_id: customOrderId },
+    { collect_request_id: customOrderId },
+  ],
+});
 
-        // ✅ New unified field
-        amount:
-          orderStatus.transaction_amount ??
-          orderStatus.order_amount ??
-          0,
+    const order = await this.orderModel.findById(customOrderId).lean();
 
-        // ✅ Legacy fields (safe to remove later)
-        orderAmount: orderStatus.order_amount ?? 0,
-        transaction_amount: orderStatus.transaction_amount ?? 0,
-
-        paymentMode: orderStatus.payment_mode || 'N/A',
-        paymentTime: orderStatus.payment_time,
-        bankReference: orderStatus.bank_reference || 'N/A',
-        paymentMessage: orderStatus.payment_message || '',
-      };
-    } catch (error) {
-      this.logger.error('Error fetching transaction status', error);
-      throw new BadRequestException('Failed to fetch transaction status');
+    if (!orderStatus && !order) {
+      return { customOrderId, status: 'not_found' };
     }
-  }
 
-  // ✅ New method: update payment status (called by webhook)
-  async updatePaymentStatus(orderId: string, gatewayStatus: string, details?: any) {
-    try {
-      // ✅ Normalize status
-      const normalized: PaymentStatus = this.mapGatewayStatus(gatewayStatus);
+    // ✅ Resolve amount: prefer orderStatus, fallback to order.amount
+   // ✅ Resolve amount: prefer orderStatus, fallback to order.amount
+const resolvedAmount =
+  orderStatus?.transaction_amount ??
+  orderStatus?.order_amount ??
+  order?.amount ??
+  order?.metadata?.amount ??
+  0;
 
-      // ✅ Extract amount (Cashfree sends "orderAmount")
-      const transactionAmount =
-        details?.transaction_amount ??
-        details?.order_amount ??
-        details?.orderAmount ??
-        details?.amount ??
-        0;
 
-      // ✅ Extract payment time
-      const paymentTime =
-        details?.payment_time ??
-        details?.paymentTime ??
-        details?.txTime
-          ? new Date(details.payment_time ?? details.paymentTime ?? details.txTime)
-          : new Date();
-
-      // ✅ Extract payment method
-      const paymentMethod =
-        details?.payment_mode ??
-        details?.paymentMode ??
-        'N/A';
-
-      // ✅ Prepare update payload
-      const update: any = {
-        status: normalized, // success | pending | failed | cancelled
-        transaction_amount: transactionAmount,
-        order_amount: transactionAmount,
-        payment_time: paymentTime,
-        payment_mode: paymentMethod,
-        bank_reference: details?.referenceId ?? details?.bank_reference ?? 'N/A',
-        payment_message: details?.txMsg ?? details?.payment_message ?? `Payment ${normalized}`,
-        gateway_status: gatewayStatus,
-        payment_details: details ? JSON.stringify(details) : undefined,
-      };
-
-      const updated = await this.orderStatusModel.findOneAndUpdate(
-        {
-          $or: [
-            { custom_order_id: orderId },       // ✅ main lookup
-            { order_id: orderId },              // fallback
-            { collect_request_id: orderId },
-            { collect_id: orderId }     // gateway reference fallback
-          ]
-        },
-        { $set: update },
-        { new: true, upsert: true }
-      );
-
-      this.logger.log(`Updated payment status for ${orderId}: ${normalized}, amount: ${transactionAmount}`);
-      return updated;
-    } catch (err) {
-      this.logger.error(`Failed to update payment status for ${orderId}:`, err?.response?.data ?? err.message ?? err);
-      throw err;
-    }
+    return {
+      customOrderId,
+      status: orderStatus?.status || 'pending',
+      amount: resolvedAmount,
+      orderAmount: orderStatus?.order_amount ?? order?.amount ?? 0,
+      transaction_amount: orderStatus?.transaction_amount ?? order?.amount ?? 0,
+      paymentMode: orderStatus?.payment_mode || 'N/A',
+      paymentTime: orderStatus?.payment_time,
+      bankReference: orderStatus?.bank_reference || 'N/A',
+      paymentMessage: orderStatus?.payment_message || '',
+    };
+  } catch (error) {
+    this.logger.error('Error fetching transaction status', error);
+    throw new BadRequestException('Failed to fetch transaction status');
   }
 }
+// Fetch all transactions
+async getAllTransactions(page = 1, limit = 10) {
+  const skip = (page - 1) * limit;
+
+  const transactions = await this.orderStatusModel.aggregate([
+    {
+      $lookup: {
+        from: 'orders',
+        localField: 'collect_id',
+        foreignField: '_id',
+        as: 'order',
+      },
+    },
+    { $unwind: '$order' },
+    { $skip: skip },
+    { $limit: limit },
+    {
+      $project: {
+        _id: 0,
+        collect_id: '$provider_collect_id',  // ✅ external ID
+        school_id: '$order.school_id',
+        gateway: '$order.gateway_name',
+        order_amount: 1,
+        transaction_amount: 1,
+        status: 1,
+        custom_order_id: 1,
+      },
+    },
+  ]);
+
+  return { page, limit, transactions };
+}
+
+// Fetch transactions by school
+async getTransactionsBySchool(schoolId: string, page = 1, limit = 10) {
+  const skip = (page - 1) * limit;
+
+  const transactions = await this.orderStatusModel.aggregate([
+    {
+      $lookup: {
+        from: 'orders',
+        localField: 'collect_id',
+        foreignField: '_id',
+        as: 'order',
+      },
+    },
+    { $unwind: '$order' },
+    { $match: { 'order.school_id': new Types.ObjectId(schoolId) } },
+    { $skip: skip },
+    { $limit: limit },
+    {
+      $project: {
+        _id: 0,
+        collect_id: '$provider_collect_id',
+        school_id: '$order.school_id',
+        gateway: '$order.gateway_name',
+        order_amount: 1,
+        transaction_amount: 1,
+        status: 1,
+        custom_order_id: 1,
+      },
+    },
+  ]);
+
+  return { page, limit, transactions };
+}
+
+
+  // ✅ New method: update payment status (called by webhook)
+ // ✅ New method: update payment status (called by webhook)
+async updatePaymentStatus(orderId: string, gatewayStatus: string, details?: any) {
+  try {
+    // ✅ Normalize status
+    const normalized: PaymentStatus = this.mapGatewayStatus(gatewayStatus);
+
+    // 🔍 Fetch the order first so we always have a real ObjectId
+// 🔍 Fetch the order first so we always have a real ObjectId
+const searchConditions: Record<string, any>[] = [
+  { custom_order_id: orderId },
+  { 'metadata.collectRequestId': orderId },
+  { 'metadata.collect_id': orderId },
+  { order_id: orderId },
+];
+
+if (Types.ObjectId.isValid(orderId)) {
+  searchConditions.push({ _id: new Types.ObjectId(orderId) });
+}
+
+this.logger.debug(`updatePaymentStatus() searching with conditions: ${JSON.stringify(searchConditions, null, 2)}`);
+
+const order = await this.orderModel.findOne({ $or: searchConditions });
+
+if (!order) {
+  this.logger.warn(`updatePaymentStatus(): No order found for orderId=${orderId}`);
+} else {
+  this.logger.log(`updatePaymentStatus(): Found order -> _id=${order._id}, custom_order_id=${order.custom_order_id}`);
+}
+
+
+    if (!order) {
+      this.logger.warn(`No order found for updatePaymentStatus: ${orderId}`);
+      return null;
+    }
+
+    // ✅ Extract amounts
+// ✅ Extract amounts safely
+let transactionAmount =
+  details?.transaction_amount ??
+  details?.order_amount ??
+  details?.orderAmount ??
+  details?.amount ??
+  0;
+
+// ✅ Fallback: use the order’s original amount if webhook didn’t send any
+if (!transactionAmount || transactionAmount === 0) {
+  transactionAmount = order.amount ?? 0;
+}
+
+
+    // ✅ Extract payment time
+    const paymentTime =
+      details?.payment_time ??
+      details?.paymentTime ??
+      details?.txTime
+        ? new Date(details.payment_time ?? details.paymentTime ?? details.txTime)
+        : new Date();
+
+    // ✅ Extract payment method
+  const paymentMethod =
+  details?.payment_mode ??         // direct
+  details?.paymentMode ??          // camelCase
+  details?.data?.payment_mode ??   // inside webhook.data
+  'N/A';
+
+
+    // ✅ Prepare update payload 
+    const update: any = {
+      collect_id: new Types.ObjectId(order._id),  
+      provider_collect_id: details?.order_id || details?.collect_id || null, // ✅ store external reference // always ObjectId
+      custom_order_id: order.custom_order_id,
+      order_amount: transactionAmount,
+      transaction_amount: transactionAmount,
+      status: normalized,
+      payment_time: paymentTime,
+      payment_mode: paymentMethod,
+      bank_reference: details?.referenceId ?? details?.bank_reference ?? 'N/A',
+      payment_message: details?.payment_message ?? `Payment ${normalized}`,
+      gateway_status: gatewayStatus,
+      payment_details: details ? JSON.stringify(details) : undefined,
+    };
+
+   const updated = await this.orderStatusModel.findOneAndUpdate(
+  {
+    collect_id: order._id,   // ✅ always use ObjectId reference
+  },
+  { $set: update },
+  { new: true, upsert: true }
+);
+    this.logger.log(
+      `Updated payment status for ${order._id}: ${normalized}, amount: ${transactionAmount}`,
+    );
+
+    // ✅ ALSO sync into orders.metadata so frontend simulator always shows latest
+    try {
+      await this.orderModel.updateOne(
+        { _id: order._id },
+        {
+          $set: {
+            'metadata.lastWebhookUpdate': new Date(),
+            'metadata.paymentStatus': normalized,
+            'metadata.bankReference': update.bank_reference,
+            'metadata.transactionId':
+              details?.transaction_id || details?.cf_payment_id || null,
+          },
+        },
+      );
+    } catch (e) {
+      this.logger.warn(
+        'Failed to sync order metadata after status update',
+        e.message || e,
+      );
+    }
+
+    return updated;
+  } catch (err) {
+    this.logger.error(
+      `Failed to update payment status for ${orderId}:`,
+      err?.response?.data ?? err.message ?? err,
+    );
+    throw err;
+  }
+}
+
+}
+
+

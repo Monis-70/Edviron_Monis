@@ -7,6 +7,9 @@ import { OrderStatus, OrderStatusDocument } from '../schemas/order-status.schema
 import { WebhookPayloadDto } from './dto/webhook-payload.dto';
 import { v4 as uuidv4 } from 'uuid';
 import mongoose from 'mongoose';
+import { PaymentsService } from '../payments/payments.service'; 
+// put this at top of each service file (or in a shared types file)
+type PaymentStatus = 'success' | 'pending' | 'failed' | 'cancelled';
 
 @Injectable()
 export class WebhooksService {
@@ -16,6 +19,7 @@ export class WebhooksService {
     @InjectModel(WebhookLog.name) private webhookLogModel: Model<WebhookLogDocument>,
     @InjectModel(Order.name) private orderModel: Model<OrderDocument>,
     @InjectModel(OrderStatus.name) private orderStatusModel: Model<OrderStatusDocument>,
+    private paymentsService: PaymentsService,
   ) {}
 
   // ✅ Validate payload safely (supports Cashfree + your old format)
@@ -53,45 +57,57 @@ export class WebhooksService {
 
       let orderInfo: any;
 
-      // ✅ Case 1: Cashfree format
-      if (payload.data) {
-        const data = payload.data;
-        orderInfo = {
-          order_id: data.order_id || payload.collect_request_id,
-          order_amount: this.parseAmount(data.order_amount),
-          transaction_amount: this.parseAmount(data.payment_amount || data.order_amount),
-          gateway: 'Cashfree',
-          status: this.mapCashfreeStatus(data.payment_status),
-          payment_mode: data.payment_method || 'unknown',
-          payment_time: data.payment_completion_time || new Date().toISOString(),
-          bank_reference: data.cf_payment_id || '',
-          payment_message: data.payment_message || payload.type || '',
-          error_message: data.failure_reason || 'NA',
-          transaction_id: data.cf_payment_id,
-        };
-      }
-      // ✅ Case 2: Your old format (collect_request_id / order_id)
-      else if (payload.collect_request_id || payload.order_id) {
-        orderInfo = {
-          order_id: payload.collect_request_id || payload.order_id,
-          order_amount: this.parseAmount(payload.amount || payload.order_amount),
-          transaction_amount: this.parseAmount(payload.amount || payload.transaction_amount),
-          gateway: payload.gateway || payload.payment_gateway || 'PhonePe',
-          status: this.mapPaymentStatus(payload.status),
-          payment_mode: payload.payment_method || 'unknown',
-          payment_time: payload.payment_time || new Date().toISOString(),
-          bank_reference: payload.transaction_id || '',
-          payment_message: payload.message || '',
-          error_message: payload.error || 'NA',
-        };
-      }
+// ✅ Case 1: Cashfree format
+if (payload.data) {
+  const data = payload.data;
+  orderInfo = {
+    order_id: data.order_id || payload.collect_request_id,
+    order_amount: this.parseAmount(payload.amount || payload.am || payload.order_amount),
+    transaction_amount: this.parseAmount(payload.amount || payload.am || payload.transaction_amount),
+    gateway: 'Cashfree',
+    status: this.mapGatewayStatus(data.payment_status, data.capture_status),
+
+    // 🔧 FIXED: prefer top-level payload.payment_mode > data.payment_method > 'unknown'
+    payment_mode: payload.payment_mode || data.payment_method || 'unknown',
+
+    payment_time: data.payment_completion_time || new Date().toISOString(),
+    bank_reference: data.cf_payment_id || '',
+    payment_message: data.payment_message || payload.type || '',
+    error_message: data.failure_reason || 'NA',
+    gateway_status: data.payment_status || data.status || 'N/A',
+    transaction_id: data.cf_payment_id,
+  };
+}
+// ✅ Case 2: Your old format
+else if (payload.collect_request_id || payload.order_id) {
+  orderInfo = {
+    order_id: payload.collect_request_id || payload.order_id,
+    order_amount: this.parseAmount(payload.amount || payload.order_amount),
+    transaction_amount: this.parseAmount(payload.amount || payload.transaction_amount),
+    gateway: payload.gateway || payload.payment_gateway || 'PhonePe',
+    status: this.mapGatewayStatus(payload.status),
+
+    // 🔧 FIXED: prefer payload.payment_mode > payload.payment_method
+    payment_mode: payload.payment_mode || payload.payment_method || 'unknown',
+
+    payment_time: payload.payment_time || new Date().toISOString(),
+    bank_reference: payload.transaction_id || '',
+    payment_message: payload.message || '',
+    error_message: payload.error || 'NA',
+  };
+}
+
+
+  
       // ✅ Case 3: Legacy order_info format
-      else if (payload.order_info) {
-        orderInfo = {
-          ...payload.order_info,
-          order_amount: this.parseAmount(payload.order_info.order_amount || payload.order_info.amount),
-          transaction_amount: this.parseAmount(payload.order_info.transaction_amount || payload.order_info.amount),
-        };
+else if (payload.order_info) {
+  orderInfo = {
+    ...payload.order_info,
+    order_amount: this.parseAmount(payload.order_info.order_amount || payload.order_info.amount),
+    transaction_amount: this.parseAmount(payload.order_info.transaction_amount || payload.order_info.amount),
+    status: this.mapGatewayStatus(payload.order_info.status, payload.order_info.capture_status), // <-- normalize here
+  };
+
       } else {
         throw new Error('Invalid webhook payload format');
       }
@@ -99,8 +115,30 @@ export class WebhooksService {
       // Update log → processing
       await this.webhookLogModel.findByIdAndUpdate(webhookLog._id, { status: 'processing' });
 
+      // call PaymentsService implementation
+// ✅ Normalize orderId
+const orderId =
+  payload.order_id ||
+  payload.collect_request_id ||
+  payload.custom_order_id ||
+  payload.collect_id;
+
+// ✅ Normalize gatewayStatus
+const gatewayStatus =
+  payload.status ||
+  payload.payment_status ||
+  payload.txStatus ||
+  'PENDING';
+
+await this.paymentsService.updatePaymentStatus(
+  orderId,
+  gatewayStatus,
+  payload
+);
+
+
       // Update DB with payment status
-      const result = await this.updatePaymentStatus(orderInfo);
+     const result = await this.updatePaymentStatusFromWebhook(orderInfo);
 
       // Finalize log
       const processingTime = Date.now() - startTime;
@@ -154,51 +192,58 @@ export class WebhooksService {
     return 0;
   }
 
-  // ✅ Cashfree status mapping
-  private mapCashfreeStatus(status: string): string {
-    const statusMap = {
-      SUCCESS: 'success',
-      FAILED: 'failed',
-      USER_DROPPED: 'cancelled',
-      PENDING: 'pending',
-      CANCELLED: 'cancelled',
-      FLAGGED: 'failed',
-    };
-    return statusMap[status?.toUpperCase()] || 'unknown';
-  }
 
-  // ✅ Generic status mapping
-  private mapPaymentStatus(status: string): string {
-    const statusMap = {
-      success: 'success',
-      completed: 'success',
-      paid: 'success',
-      failed: 'failed',
-      cancelled: 'cancelled',
-      pending: 'pending',
-      processing: 'processing',
-      refunded: 'refunded',
-      user_dropped: 'cancelled',
-    };
-    return statusMap[status?.toLowerCase()] || 'unknown';
+
+// ✅ Unified status mapper
+// ✅ Unified status mapper
+
+private mapGatewayStatus(
+  gatewayStatus: string,
+  captureStatusRaw?: string
+): PaymentStatus {
+  if (!gatewayStatus) return 'pending';
+
+  const normalized = gatewayStatus.toUpperCase();
+  
+  // ✅ REMOVED: Cashfree capture_status logic per their documentation
+  
+  switch (normalized) {
+    case 'SUCCESS':
+    case 'COMPLETED':
+    case 'PAID':
+      return 'success';
+    case 'FAILED':
+    case 'DECLINED':
+    case 'ERROR':
+      return 'failed';
+    case 'USER_DROPPED':
+    case 'CANCELLED':
+    case 'CANCELED':
+      return 'cancelled';
+    default:
+      return 'pending';
   }
+}
+
+
+
 
   // ✅ Update DB with payment status
 // Replace only the updatePaymentStatus method with the following:
-private async updatePaymentStatus(orderInfo: any) {
+private async updatePaymentStatusFromWebhook(orderInfo: any) {
   try {
     this.logger.debug(`Searching for order: ${orderInfo.order_id}`);
 
     const searchConditions: any[] = [
       { 'metadata.collectRequestId': orderInfo.order_id },
-      { 'student_info.custom_order_id': orderInfo.order_id },
+      { 'metadata.collect_id': orderInfo.order_id },
       { custom_order_id: orderInfo.order_id },
-      { 'metadata.collect_id': orderInfo.order_id }, // extra fallback if stored differently
+      { order_id: orderInfo.order_id },
+      { 'student_info.custom_order_id': orderInfo.order_id },
+      ...(mongoose.Types.ObjectId.isValid(orderInfo.order_id)
+        ? [{ _id: orderInfo.order_id }]
+        : []),
     ];
-
-    if (mongoose.Types.ObjectId.isValid(orderInfo.order_id)) {
-      searchConditions.push({ _id: orderInfo.order_id });
-    }
 
     const order = await this.orderModel.findOne({ $or: searchConditions }).lean();
 
@@ -207,6 +252,7 @@ private async updatePaymentStatus(orderInfo: any) {
       return {
         orderId: orderInfo.order_id,
         customOrderId: orderInfo.order_id,
+        providerCollectId: orderInfo.order_id || null,
         status: 'order_not_found',
         orderAmount: orderInfo.order_amount || 0,
         transactionAmount: orderInfo.transaction_amount || 0,
@@ -214,31 +260,59 @@ private async updatePaymentStatus(orderInfo: any) {
       };
     }
 
-    // Resolve amounts with robust fallbacks:
-    // 1) webhook value
-    // 2) webhook transaction amount
-    // 3) order top-level amount (order.amount)
-    // 4) metadata.amount stored earlier
-    // 5) zero
+    // ✅ Resolve amounts robustly
     const orderTopAmount = (order as any).amount ?? (order as any).order_amount ?? undefined;
+    const parsedOrderAmt = parseFloat(orderInfo.order_amount);
+    const parsedTxnAmt = parseFloat(orderInfo.transaction_amount);
+    const parsedTopAmt = parseFloat(orderTopAmount);
+    const parsedMetaAmt = parseFloat(order.metadata?.amount);
+
     const resolvedOrderAmount =
-      (orderInfo.order_amount ?? orderInfo.transaction_amount) ??
-      orderTopAmount ??
-      order.metadata?.amount ??
-      0;
+      !isNaN(parsedOrderAmt) && parsedOrderAmt > 0
+        ? parsedOrderAmt
+        : !isNaN(parsedTxnAmt) && parsedTxnAmt > 0
+        ? parsedTxnAmt
+        : !isNaN(parsedTopAmt) && parsedTopAmt > 0
+        ? parsedTopAmt
+        : !isNaN(parsedMetaAmt) && parsedMetaAmt > 0
+        ? parsedMetaAmt
+        : 0;
 
     const resolvedTransactionAmount =
-      orderInfo.transaction_amount ?? orderInfo.order_amount ?? resolvedOrderAmount;
+      !isNaN(parsedTxnAmt) && parsedTxnAmt > 0
+        ? parsedTxnAmt
+        : !isNaN(parsedOrderAmt) && parsedOrderAmt > 0
+        ? parsedOrderAmt
+        : resolvedOrderAmount;
 
-const statusData = {
-  collect_id: (order._id || order.id).toString(),
+    // ✅ Normalize status using gateway + capture_status
+    const normalizedStatus = this.mapGatewayStatus(
+      orderInfo.status,
+      orderInfo.capture_status
+    );
+
+ const statusData = {
+  collect_id: new mongoose.Types.ObjectId(order._id),
+  provider_collect_id: orderInfo.order_id || null,
+  custom_order_id: order.custom_order_id,
+
   order_amount: resolvedOrderAmount,
   transaction_amount: resolvedTransactionAmount,
+
+  // 🔧 FIXED: prefer top-level payload’s mode if available
   payment_mode: orderInfo.payment_mode || 'unknown',
-  payment_details: orderInfo.payment_details || JSON.stringify(orderInfo) || '',
+
+  // 🔧 FIXED: also embed correct mode into payment_details
+  payment_details: JSON.stringify({
+    ...orderInfo,
+    payment_mode: orderInfo.payment_mode || 'unknown',
+  }),
+
   bank_reference: orderInfo.bank_reference || orderInfo.transaction_id || 'N/A',
   payment_message: orderInfo.payment_message || orderInfo.payment_msg || '',
-  status: orderInfo.status,
+  status: normalizedStatus,
+  gateway_status: orderInfo.status || 'N/A',
+  capture_status: orderInfo.capture_status || null,
   error_message: orderInfo.error_message || orderInfo.error || 'N/A',
   payment_time: new Date(orderInfo.payment_time || Date.now()),
 };
@@ -248,7 +322,7 @@ const statusData = {
     this.logger.debug('Resolved amounts:', { resolvedOrderAmount, resolvedTransactionAmount });
     this.logger.debug('Status data being saved:', JSON.stringify(statusData));
 
-    // find existing orderStatus by order reference
+    // ✅ Upsert order status
     let orderStatus = await this.orderStatusModel.findOne({ collect_id: order._id });
     const previousStatus = orderStatus?.status;
 
@@ -258,12 +332,12 @@ const statusData = {
       orderStatus = await this.orderStatusModel.create(statusData);
     }
 
-    // update order metadata with reliable values
+    // ✅ Update order metadata
     await this.orderModel.findByIdAndUpdate(order._id, {
       $set: {
         'metadata.lastWebhookUpdate': new Date(),
         'metadata.paymentStatus': statusData.status,
-        'metadata.bankReference': orderInfo.bank_reference,
+        'metadata.bankReference': statusData.bank_reference,
         'metadata.amount': resolvedOrderAmount,
         'metadata.transactionId': orderInfo.transaction_id || orderInfo.transactionId || null,
       },
@@ -272,9 +346,10 @@ const statusData = {
     this.logger.log(`Payment status updated for order: ${order._id}`);
 
     return {
-      orderId: order._id,
-      customOrderId: order._id.toString(),
-      status: statusData.status,
+      orderId: order._id.toString(),                 // Mongo ID
+      customOrderId: order.custom_order_id,          // internal ID
+      providerCollectId: orderInfo.order_id || null, // Edviron external ID
+      status: normalizedStatus,
       orderAmount: resolvedOrderAmount,
       transactionAmount: resolvedTransactionAmount,
       previousStatus,
@@ -284,6 +359,7 @@ const statusData = {
     throw error;
   }
 }
+
 
 
   // ✅ Logs
@@ -308,7 +384,16 @@ const statusData = {
 async getOrderStatus(orderId: string) {
   try {
     // First, check if order exists
-    const order = await this.orderModel.findOne({ order_id: orderId }).lean();
+   const order = await this.orderModel.findOne({
+  $or: [
+    { order_id: orderId },
+    { custom_order_id: orderId },
+    { 'metadata.collectRequestId': orderId },
+    { 'metadata.collect_id': orderId },
+    ...(mongoose.Types.ObjectId.isValid(orderId) ? [{ _id: orderId }] : []),
+  ],
+}).lean();
+
 
     if (!order) {
       return { status: 'order_not_found', orderId };
@@ -322,13 +407,16 @@ async getOrderStatus(orderId: string) {
 
 return {
   order: {
-    orderId: (order as any).order_id,
+    orderId: order._id.toString(),                           // ✅ local
+    customOrderId: order.custom_order_id,                    // ✅ internal
+    providerCollectId: latestLog?.response?.providerCollectId || null, // ✅ external
     status: (order as any).status || latestLog?.status || 'unknown',
     orderAmount: (order as any).order_amount || latestLog?.response?.orderAmount || 0,
     transactionAmount: (order as any).transaction_amount || latestLog?.response?.transactionAmount || 0,
     previousStatus: latestLog?.response?.previousStatus || null,
   },
 };
+
 
    
   } catch (error) {
@@ -355,7 +443,8 @@ return {
             order_id: data.order_id,
             order_amount: this.parseAmount(data.order_amount),
             transaction_amount: this.parseAmount(data.payment_amount || data.order_amount),
-            status: this.mapCashfreeStatus(data.payment_status),
+           status: this.mapGatewayStatus(data.payment_status),
+
           };
         } else if (webhook.payload.order_info) {
           orderInfo = webhook.payload.order_info;
@@ -363,7 +452,7 @@ return {
           throw new Error('Cannot extract order info from webhook payload');
         }
 
-        await this.updatePaymentStatus(orderInfo);
+        await this.updatePaymentStatusFromWebhook(orderInfo);
 
         await this.webhookLogModel.findByIdAndUpdate(webhook._id, {
           status: 'processed',

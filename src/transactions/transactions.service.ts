@@ -1,524 +1,628 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
-import { InjectModel } from '@nestjs/mongoose';
-import { Model, Types } from 'mongoose';
-import { Order, OrderDocument } from '../schemas/order.schema';
-import { OrderStatus, OrderStatusDocument } from '../schemas/order-status.schema';
-import { GetTransactionsDto } from './dto/get-transactions.dto';
-import { TransactionFiltersDto } from './dto/transaction-filters.dto';
+  import { Injectable, NotFoundException } from '@nestjs/common';
+  import { InjectModel } from '@nestjs/mongoose';
+  import { Model, Types } from 'mongoose';
+  import { Order, OrderDocument } from '../schemas/order.schema';
+  import { OrderStatus, OrderStatusDocument } from '../schemas/order-status.schema';
+  import { GetTransactionsDto } from './dto/get-transactions.dto';
+  import { TransactionFiltersDto } from './dto/transaction-filters.dto';
+  import PDFDocument = require('pdfkit');
+  import * as streamBuffers from 'stream-buffers';
+  // put this at top of each service file (or in a shared types file)
+  type PaymentStatus = 'success' | 'pending' | 'failed' | 'cancelled';
 
-@Injectable()
-export class TransactionsService {
-  constructor(
-    @InjectModel(Order.name) private orderModel: Model<OrderDocument>,
-    @InjectModel(OrderStatus.name) private orderStatusModel: Model<OrderStatusDocument>,
-  ) {}
+  @Injectable()
+  export class TransactionsService {
+    constructor(
+      @InjectModel(Order.name) private orderModel: Model<OrderDocument>,
+      @InjectModel(OrderStatus.name) private orderStatusModel: Model<OrderStatusDocument>,
+    ) {}
 
-  async getAllTransactions(query: GetTransactionsDto) {
-    const {
-      page = 1,
-      limit = 10,
-      sort = 'created_at',
-      order = 'desc',
-      status,
-      gateway,
-      startDate,
-      endDate,
-      minAmount,
-      maxAmount,
-      search,
-    } = query;
+    async getAllTransactions(query: GetTransactionsDto) {
+      const {
+        page = 1,
+        limit = 10,
+        sort = 'created_at',
+        order = 'desc',
+        status,
+        gateway,
+        startDate,
+        endDate,
+        minAmount,
+        maxAmount,
+        search,
+      } = query;
 
-    const pipeline: any[] = [];
+      const pipeline: any[] = [];
 
-    pipeline.push({
-      $lookup: {
-        from: 'order_status',
-        localField: '_id',
-        foreignField: 'collect_id',
-        as: 'status_info',
-      },
-    });
-
-    pipeline.push({
-      $unwind: {
-        path: '$status_info',
-        preserveNullAndEmptyArrays: true,
-      },
-    });
-
-    pipeline.push({
-      $addFields: {
-        collect_id: '$_id',
-        order_amount: '$status_info.order_amount',
-        transaction_amount: '$status_info.transaction_amount',
-        status: { $ifNull: ['$status_info.status', 'pending'] },
-        payment_mode: '$status_info.payment_mode',
-        payment_time: '$status_info.payment_time',
-        payment_message: '$status_info.payment_message',
-        bank_reference: '$status_info.bank_reference',
-      },
-    });
-
-    const matchStage: any = {};
-
-    if (status) {
-      matchStage.status = status;
-    }
-
-    if (gateway) {
-      matchStage.gateway_name = gateway;
-    }
-
-    if (startDate || endDate) {
-      matchStage.created_at = {};
-      if (startDate) {
-        matchStage.created_at.$gte = new Date(startDate);
-      }
-      if (endDate) {
-        matchStage.created_at.$lte = new Date(endDate);
-      }
-    }
-
-    if (minAmount || maxAmount) {
-      matchStage.order_amount = {};
-      if (minAmount) {
-        matchStage.order_amount.$gte = minAmount;
-      }
-      if (maxAmount) {
-        matchStage.order_amount.$lte = maxAmount;
-      }
-    }
-
-    if (search) {
-      matchStage.$or = [
-        { custom_order_id: { $regex: search, $options: 'i' } },
-        { 'student_info.name': { $regex: search, $options: 'i' } },
-        { 'student_info.email': { $regex: search, $options: 'i' } },
-        { bank_reference: { $regex: search, $options: 'i' } },
-      ];
-    }
-
-    if (Object.keys(matchStage).length > 0) {
-      pipeline.push({ $match: matchStage });
-    }
-
-    const sortField = this.mapSortField(sort);
-    const sortOrder = order === 'desc' ? -1 : 1;
-    const skip = (page - 1) * limit;
-
-    pipeline.push({
-      $facet: {
-        metadata: [
-          { $count: 'total' },
-          {
-            $addFields: {
-              page: page,
-              limit: limit,
-              pages: { $ceil: { $divide: ['$total', limit] } },
-            },
-          },
-        ],
-        data: [
-          { $sort: { [sortField]: sortOrder } },
-          { $skip: skip },
-          { $limit: limit },
-          {
-            $project: {
-              collect_id: 1,
-              school_id: 1,
-              gateway: '$gateway_name',
-              order_amount: 1,
-              transaction_amount: 1,
-              status: 1,
-              custom_order_id: 1,
-              student_info: 1,
-              payment_mode: 1,
-              payment_time: 1,
-              payment_message: 1,
-              bank_reference: 1,
-              created_at: 1,
-              updated_at: 1,
-            },
-          },
-        ],
-        summary: [
-          {
-            $group: {
-              _id: null,
-              totalAmount: { $sum: '$order_amount' },
-              totalTransactionAmount: { $sum: '$transaction_amount' },
-              averageAmount: { $avg: '$order_amount' },
-              successCount: {
-                $sum: { $cond: [{ $eq: ['$status', 'success'] }, 1, 0] },
-              },
-              failedCount: {
-                $sum: { $cond: [{ $eq: ['$status', 'failed'] }, 1, 0] },
-              },
-              pendingCount: {
-                $sum: { $cond: [{ $eq: ['$status', 'pending'] }, 1, 0] },
-              },
-            },
-          },
-        ],
-      },
-    });
-
-    pipeline.push({
-      $project: {
-        data: 1,
-        pagination: { $arrayElemAt: ['$metadata', 0] },
-        summary: { $arrayElemAt: ['$summary', 0] },
-      },
-    });
-
-    const result = await this.orderModel.aggregate(pipeline);
-    const response = result[0] || { data: [], pagination: null, summary: null };
-
-    const formattedResponse = {
-      success: true,
-      data: response.data,
-      pagination: response.pagination || {
-        total: 0,
-        page: page,
-        limit: limit,
-        pages: 0,
-      },
-      summary: response.summary || {
-        totalAmount: 0,
-        totalTransactionAmount: 0,
-        averageAmount: 0,
-        successCount: 0,
-        failedCount: 0,
-        pendingCount: 0,
-      },
-    };
-
-    return formattedResponse;
-  }
-
-  async getTransactionsBySchool(schoolId: string, filters: TransactionFiltersDto) {
-    const {
-      page = 1,
-      limit = 10,
-      status,
-      startDate,
-      endDate,
-      sort = 'created_at',
-      order = 'desc',
-    } = filters;
-
-    if (!Types.ObjectId.isValid(schoolId)) {
-      throw new NotFoundException('Invalid school ID');
-    }
-
-    const pipeline: any[] = [];
-
-    pipeline.push({
-      $match: { school_id: new Types.ObjectId(schoolId) },
-    });
-
-    pipeline.push({
-      $lookup: {
-        from: 'order_status',
-        localField: '_id',
-        foreignField: 'collect_id',
-        as: 'status_info',
-      },
-    });
-
-    pipeline.push({
-      $unwind: {
-        path: '$status_info',
-        preserveNullAndEmptyArrays: true,
-      },
-    });
-
-    const matchFilters: any = {};
-
-    if (status) {
-      matchFilters['status_info.status'] = status;
-    }
-
-    if (startDate || endDate) {
-      matchFilters.created_at = {};
-      if (startDate) {
-        matchFilters.created_at.$gte = new Date(startDate);
-      }
-      if (endDate) {
-        matchFilters.created_at.$lte = new Date(endDate);
-      }
-    }
-
-    if (Object.keys(matchFilters).length > 0) {
-      pipeline.push({ $match: matchFilters });
-    }
-
-    pipeline.push({
-      $group: {
-        _id: {
-          date: { $dateToString: { format: '%Y-%m-%d', date: '$created_at' } },
-          status: '$status_info.status',
+      pipeline.push({
+        $lookup: {
+           from: 'orderstatuses',
+          localField: '_id',
+          foreignField: 'collect_id',
+          as: 'status_info',
         },
-        count: { $sum: 1 },
-        totalAmount: { $sum: '$status_info.order_amount' },
-        transactions: {
-          $push: {
-            collect_id: '$_id',
-            custom_order_id: '$custom_order_id',
-            student_info: '$student_info',
-            amount: '$status_info.order_amount',
-            status: '$status_info.status',
-            payment_time: '$status_info.payment_time',
-            gateway: '$gateway_name',
-          },
+      });
+
+      pipeline.push({
+        $unwind: {
+          path: '$status_info',
+          preserveNullAndEmptyArrays: true,
         },
-      },
-    });
+      });
 
-    const sortField = order === 'desc' ? -1 : 1;
-    pipeline.push({ $sort: { '_id.date': sortField } });
-
-    const skip = (page - 1) * limit;
-    pipeline.push({ $skip: skip });
-    pipeline.push({ $limit: limit });
-
-    const [transactions, totalCount] = await Promise.all([
-      this.orderModel.aggregate(pipeline),
-      this.orderModel.countDocuments({ school_id: new Types.ObjectId(schoolId) }),
-    ]);
-
-    return {
-      success: true,
-      schoolId,
-      data: transactions,
-      pagination: {
-        total: totalCount,
-        page,
-        limit,
-        pages: Math.ceil(totalCount / limit),
-      },
-    };
-  }
-
-async getTransactionStatus(customOrderId: string) {
-  const order = await this.orderModel.findOne({ custom_order_id: customOrderId });
-
-  if (!order) {
-    throw new NotFoundException('Transaction not found');
-  }
-
-  const orderStatus = await this.orderStatusModel.findOne({ 
-    collect_id: order._id 
+  pipeline.push({
+    $addFields: {
+      collect_id: '$_id',
+order_amount: {
+  $ifNull: ['$status_info.order_amount', '$amount']  // fallback to orders.amount
+},
+transaction_amount: {
+  $ifNull: ['$status_info.transaction_amount', '$amount']
+},
+      status: { $ifNull: ['$status_info.status', 'pending'] },
+      gateway_status: '$status_info.gateway_status',   // <-- add this
+      payment_mode: '$status_info.payment_mode',
+      payment_time: '$status_info.payment_time',
+      payment_message: '$status_info.payment_message',
+      bank_reference: '$status_info.bank_reference',
+    },
   });
 
-const response = {
-  success: true,
-  transaction: {
-    custom_order_id: order._id.toString(),
-    school_id: order.school_id,
-    student_info: order.student_info,
-    gateway_name: order.gateway_name,
-    amount: order.amount,
-    created_at: order.createdAt, // Mongoose timestamp
-    status: orderStatus?.status || 'pending',
-    order_amount: orderStatus?.order_amount || 0,
-    transaction_amount: orderStatus?.transaction_amount || 0,
-    payment_mode: orderStatus?.payment_mode || null,
-    payment_time: orderStatus?.payment_time || null,
-    bank_reference: orderStatus?.bank_reference || null,
-    payment_message: orderStatus?.payment_message || null,
-    error_message: orderStatus?.error_message || null,
-  },
-};
+      const matchStage: any = {};
 
+      if (status) {
+        matchStage.status = status;
+      }
 
+      if (gateway) {
+        matchStage.gateway_name = gateway;
+      }
 
-  return response;
+      if (startDate || endDate) {
+        matchStage.created_at = {};
+        if (startDate) {
+          matchStage.created_at.$gte = new Date(startDate);
+        }
+        if (endDate) {
+          matchStage.created_at.$lte = new Date(endDate);
+        }
+      }
+
+      if (minAmount || maxAmount) {
+        matchStage.order_amount = {};
+        if (minAmount) {
+          matchStage.order_amount.$gte = minAmount;
+        }
+        if (maxAmount) {
+          matchStage.order_amount.$lte = maxAmount;
+        }
+      }
+
+      if (search) {
+        matchStage.$or = [
+          { custom_order_id: { $regex: search, $options: 'i' } },
+          { 'student_info.name': { $regex: search, $options: 'i' } },
+          { 'student_info.email': { $regex: search, $options: 'i' } },
+          { bank_reference: { $regex: search, $options: 'i' } },
+        ];
+      }
+
+      if (Object.keys(matchStage).length > 0) {
+        pipeline.push({ $match: matchStage });
+      }
+
+      const sortField = this.mapSortField(sort);
+      const sortOrder = order === 'desc' ? -1 : 1;
+      const skip = (page - 1) * limit;
+
+      pipeline.push({
+        $facet: {
+          metadata: [
+            { $count: 'total' },
+            {
+              $addFields: {
+                page: page,
+                limit: limit,
+                pages: { $ceil: { $divide: ['$total', limit] } },
+              },
+            },
+          ],
+          data: [
+            { $sort: { [sortField]: sortOrder } },
+            { $skip: skip },
+            { $limit: limit },
+            {
+              $project: {
+                collect_id: 1,
+                school_id: 1,
+                provider_collect_id: '$status_info.provider_collect_id',
+                gateway: '$gateway_name',
+                order_amount: 1,
+                transaction_amount: 1,
+                status: 1,
+                createdAt: 1,
+                custom_order_id: 1,
+                student_info: 1,
+                payment_mode: 1,
+                gateway_status: 1,
+                payment_time: 1,
+                payment_message: 1,
+                bank_reference: 1,
+                created_at: 1,
+                updated_at: 1,
+              },
+            },
+          ],
+          summary: [
+            {
+              $group: {
+                _id: null,
+                totalAmount: { $sum: '$order_amount' },
+                totalTransactionAmount: { $sum: '$transaction_amount' },
+                averageAmount: { $avg: '$order_amount' },
+                successCount: {
+                  $sum: { $cond: [{ $eq: ['$status', 'success'] }, 1, 0] },
+                },
+                failedCount: {
+                  $sum: { $cond: [{ $eq: ['$status', 'failed'] }, 1, 0] },
+                },
+                pendingCount: {
+                  $sum: { $cond: [{ $eq: ['$status', 'pending'] }, 1, 0] },
+                },
+              },
+            },
+          ],
+        },
+      });
+
+      pipeline.push({
+        $project: {
+          data: 1,
+          pagination: { $arrayElemAt: ['$metadata', 0] },
+          summary: { $arrayElemAt: ['$summary', 0] },
+        },
+      });
+
+      const result = await this.orderModel.aggregate(pipeline);
+      const response = result[0] || { data: [], pagination: null, summary: null };
+
+      const formattedResponse = {
+        success: true,
+        data: response.data,
+        pagination: response.pagination || {
+          total: 0,
+          page: page,
+          limit: limit,
+          pages: 0,
+        },
+        summary: response.summary || {
+          totalAmount: 0,
+          totalTransactionAmount: 0,
+          averageAmount: 0,
+          successCount: 0,
+          failedCount: 0,
+          pendingCount: 0,
+        },
+      };
+
+      return formattedResponse;
+    }
+
+ async getTransactionsBySchool(schoolId: string, filters: TransactionFiltersDto) {
+  const {
+    page = 1,
+    limit = 10,
+    status,
+    startDate,
+    endDate,
+    sort = 'created_at',
+    order = 'desc',
+  } = filters;
+
+  if (!Types.ObjectId.isValid(schoolId)) {
+    throw new NotFoundException('Invalid school ID');
+  }
+
+  const pipeline: any[] = [];
+
+  pipeline.push({
+    $match: { school_id: new Types.ObjectId(schoolId) },
+  });
+
+  pipeline.push({
+    $lookup: {
+      from: 'orderstatuses',
+      localField: '_id',
+      foreignField: 'collect_id',
+      as: 'status_info',
+    },
+  });
+
+  pipeline.push({
+    $unwind: {
+      path: '$status_info',
+      preserveNullAndEmptyArrays: true,
+    },
+  });
+
+  // ✅ Resolve consistent fields with fallbacks
+  pipeline.push({
+    $addFields: {
+      order_amount: { $ifNull: ['$status_info.order_amount', '$amount'] },
+      transaction_amount: { $ifNull: ['$status_info.transaction_amount', '$amount'] },
+      status: { $ifNull: ['$status_info.status', 'pending'] },
+      payment_time: {
+        $ifNull: ['$status_info.payment_time', '$created_at'],
+      },
+      gateway: '$gateway_name',
+    },
+  });
+
+  // ✅ Filters
+  const matchFilters: any = {};
+
+  if (status) {
+    matchFilters.status = status;
+  }
+
+  if (startDate || endDate) {
+    matchFilters.created_at = {};
+    if (startDate) matchFilters.created_at.$gte = new Date(startDate);
+    if (endDate) matchFilters.created_at.$lte = new Date(endDate);
+  }
+
+  if (Object.keys(matchFilters).length > 0) {
+    pipeline.push({ $match: matchFilters });
+  }
+
+  // ✅ Group only by DATE (not by status)
+  pipeline.push({
+    $group: {
+      _id: { date: { $dateToString: { format: '%Y-%m-%d', date: '$created_at' } } },
+      count: { $sum: 1 },
+      totalAmount: { $sum: '$order_amount' },
+      transactions: {
+        $push: {
+          collect_id: '$_id',
+          custom_order_id: '$custom_order_id',
+          student_info: '$student_info',
+          order_amount: '$order_amount',
+          transaction_amount: '$transaction_amount',
+          status: '$status',
+          payment_time: '$payment_time',
+          gateway: '$gateway',
+        },
+      },
+    },
+  });
+
+  // ✅ Sort by date
+  const sortField = order === 'desc' ? -1 : 1;
+  pipeline.push({ $sort: { '_id.date': sortField } });
+
+  // ✅ Pagination
+  const skip = (page - 1) * limit;
+  pipeline.push({ $skip: skip });
+  pipeline.push({ $limit: limit });
+
+  const [transactions, totalCount] = await Promise.all([
+    this.orderModel.aggregate(pipeline),
+    this.orderModel.countDocuments({ school_id: new Types.ObjectId(schoolId) }),
+  ]);
+
+  return {
+    success: true,
+    schoolId,
+    data: transactions.map((g) => ({
+      date: g._id.date,
+      count: g.count,
+      totalAmount: g.totalAmount,
+      transactions: g.transactions,
+    })),
+    pagination: {
+      total: totalCount,
+      page,
+      limit,
+      pages: Math.ceil(totalCount / limit),
+    },
+  };
 }
 
 
-  async getTransactionAnalytics(filters: any) {
-    const pipeline: any[] = [];
+  async getTransactionStatus(customOrderId: string) {
+    const order = await this.orderModel.findOne({ custom_order_id: customOrderId });
 
-    pipeline.push({
-      $lookup: {
-        from: 'order_status',
-        localField: '_id',
-        foreignField: 'collect_id',
-        as: 'status_info',
-      },
+    if (!order) {
+      throw new NotFoundException('Transaction not found');
+    }
+
+    const orderStatus = await this.orderStatusModel.findOne({ 
+      collect_id: order._id 
     });
+  // put this at top of each service file (or in a shared types file)
+  type PaymentStatus = 'success' | 'pending' | 'failed' | 'cancelled';
 
-    pipeline.push({
-      $unwind: {
-        path: '$status_info',
-        preserveNullAndEmptyArrays: true,
-      },
-    });
+  const response = {
+    success: true,
+    transaction: {
+      custom_order_id: order.custom_order_id,
+      school_id: order.school_id,
+      provider_collect_id: orderStatus?.provider_collect_id || null,
+      student_info: order.student_info,
+      gateway_name: order.gateway_name,
+      amount: order.amount,
+      createdAt: order.createdAt, // Mongoose timestamp
+      status: orderStatus?.status || 'pending',
+order_amount: orderStatus?.order_amount || order.amount || order.metadata?.amount || 0,
+transaction_amount: orderStatus?.transaction_amount || order.amount || order.metadata?.amount || 0,
 
-    if (filters.startDate || filters.endDate) {
-      const dateMatch: any = {};
-      if (filters.startDate) {
-        dateMatch.$gte = new Date(filters.startDate);
+      payment_mode: orderStatus?.payment_mode || null,
+      payment_time: orderStatus?.payment_time || null,
+      bank_reference: orderStatus?.bank_reference || null,
+      payment_message: orderStatus?.payment_message || null,
+      error_message: orderStatus?.error_message || null,
+    },
+  };
+
+
+
+    return response;
+  }
+
+
+async getTransactionAnalytics(filters: any) {
+  const pipeline: any[] = [];
+
+  // ✅ Fix lookup: correct collection name
+  pipeline.push({
+    $lookup: {
+      from: 'orderstatuses',
+      localField: '_id',
+      foreignField: 'collect_id',
+      as: 'status_info',
+    },
+  });
+
+  pipeline.push({
+    $unwind: {
+      path: '$status_info',
+      preserveNullAndEmptyArrays: true,
+    },
+  });
+
+  // ✅ Fix created_at -> createdAt
+  if (filters.startDate || filters.endDate) {
+    const dateMatch: any = {};
+    if (filters.startDate) {
+      dateMatch.$gte = new Date(filters.startDate);
+    }
+    if (filters.endDate) {
+      dateMatch.$lte = new Date(filters.endDate);
+    }
+    pipeline.push({ $match: { createdAt: dateMatch } });
+  }
+
+  pipeline.push({
+    $facet: {
+      dailyTrends: [
+        {
+          $group: {
+            _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } }, // ✅ fixed
+            count: { $sum: 1 },
+            totalAmount: { $sum: '$status_info.order_amount' },
+            successCount: {
+              $sum: { $cond: [{ $eq: ['$status_info.status', 'success'] }, 1, 0] },
+            },
+          },
+        },
+        { $sort: { _id: 1 } },
+        { $limit: 30 },
+      ],
+      gatewayDistribution: [
+        {
+          $group: {
+            _id: '$gateway_name',
+            count: { $sum: 1 },
+            totalAmount: { $sum: '$status_info.order_amount' },
+            successRate: {
+              $avg: { $cond: [{ $eq: ['$status_info.status', 'success'] }, 1, 0] },
+            },
+          },
+        },
+      ],
+      paymentModes: [
+        {
+          $group: {
+            _id: '$status_info.payment_mode',
+            count: { $sum: 1 },
+            totalAmount: { $sum: '$status_info.order_amount' },
+          },
+        },
+      ],
+      schoolStats: [
+        {
+          $group: {
+            _id: '$school_id',
+            transactionCount: { $sum: 1 },
+            totalRevenue: { $sum: '$status_info.order_amount' },
+            averageTransactionValue: { $avg: '$status_info.order_amount' },
+          },
+        },
+        { $sort: { totalRevenue: -1 } },
+        { $limit: 10 },
+      ],
+      overallStats: [
+        {
+          $group: {
+            _id: null,
+            totalTransactions: { $sum: 1 },
+            totalRevenue: { $sum: '$status_info.order_amount' },
+            averageTransactionValue: { $avg: '$status_info.order_amount' },
+            successRate: {
+              $avg: { $cond: [{ $eq: ['$status_info.status', 'success'] }, 1, 0] },
+            },
+            uniqueStudents: { $addToSet: '$student_info.id' },
+          },
+        },
+        {
+          $project: {
+            totalTransactions: 1,
+            totalRevenue: 1,
+            averageTransactionValue: 1,
+            successRate: { $multiply: ['$successRate', 100] },
+            uniqueStudentCount: { $size: '$uniqueStudents' },
+          },
+        },
+      ],
+    },
+  });
+
+  const result = await this.orderModel.aggregate(pipeline);
+
+  return {
+    success: true,
+    analytics: result[0],
+    generatedAt: new Date(),
+  };
+}
+
+
+    async exportTransactions(format: 'csv' | 'json' | 'pdf', filters: any) {
+      const transactions = await this.getAllTransactions({
+        ...filters,
+        limit: 10000,
+      });
+
+      switch (format) {
+        case 'csv':
+          return this.exportAsCSV(transactions.data);
+        case 'json':
+          return transactions.data;
+        case 'pdf':
+          return this.exportAsPDF(transactions.data);
+        default:
+          throw new Error('Unsupported export format');
       }
-      if (filters.endDate) {
-        dateMatch.$lte = new Date(filters.endDate);
-      }
-      pipeline.push({ $match: { created_at: dateMatch } });
     }
 
-    pipeline.push({
-      $facet: {
-        dailyTrends: [
-          {
-            $group: {
-              _id: { $dateToString: { format: '%Y-%m-%d', date: '$created_at' } },
-              count: { $sum: 1 },
-              totalAmount: { $sum: '$status_info.order_amount' },
-              successCount: {
-                $sum: { $cond: [{ $eq: ['$status_info.status', 'success'] }, 1, 0] },
-              },
-            },
-          },
-          { $sort: { _id: 1 } },
-          { $limit: 30 },
-        ],
-        gatewayDistribution: [
-          {
-            $group: {
-              _id: '$gateway_name',
-              count: { $sum: 1 },
-              totalAmount: { $sum: '$status_info.order_amount' },
-              successRate: {
-                $avg: { $cond: [{ $eq: ['$status_info.status', 'success'] }, 1, 0] },
-              },
-            },
-          },
-        ],
-        paymentModes: [
-          {
-            $group: {
-              _id: '$status_info.payment_mode',
-              count: { $sum: 1 },
-              totalAmount: { $sum: '$status_info.order_amount' },
-            },
-          },
-        ],
-        schoolStats: [
-          {
-            $group: {
-              _id: '$school_id',
-              transactionCount: { $sum: 1 },
-              totalRevenue: { $sum: '$status_info.order_amount' },
-              averageTransactionValue: { $avg: '$status_info.order_amount' },
-            },
-          },
-          { $sort: { totalRevenue: -1 } },
-          { $limit: 10 },
-        ],
-        overallStats: [
-          {
-            $group: {
-              _id: null,
-              totalTransactions: { $sum: 1 },
-              totalRevenue: { $sum: '$status_info.order_amount' },
-              averageTransactionValue: { $avg: '$status_info.order_amount' },
-              successRate: {
-                $avg: { $cond: [{ $eq: ['$status_info.status', 'success'] }, 1, 0] },
-              },
-              uniqueStudents: { $addToSet: '$student_info.id' },
-            },
-          },
-          {
-            $project: {
-              totalTransactions: 1,
-              totalRevenue: 1,
-              averageTransactionValue: 1,
-              successRate: { $multiply: ['$successRate', 100] },
-              uniqueStudentCount: { $size: '$uniqueStudents' },
-            },
-          },
-        ],
-      },
-    });
-
-    const result = await this.orderModel.aggregate(pipeline);
-    return {
-      success: true,
-      analytics: result[0],
-      generatedAt: new Date(),
-    };
+ private exportAsCSV(data: any[]): string {
+  if (!data || data.length === 0) {
+    return 'No data to export';
   }
 
-  async exportTransactions(format: 'csv' | 'json' | 'pdf', filters: any) {
-    const transactions = await this.getAllTransactions({
-      ...filters,
-      limit: 10000,
-    });
+  const headers = [
+    'Custom Order ID',
+    'Provider Collect ID',
+    'Student Name',
+    'Student Email',
+    'Amount',
+    'Transaction Amount',
+    'Status',
+    'Payment Mode',
+    'Gateway',
+    'Bank Reference',
+    'Payment Time',
+    'Created At',
+  ];
 
-    switch (format) {
-      case 'csv':
-        return this.exportAsCSV(transactions.data);
-      case 'json':
-        return transactions.data;
-      case 'pdf':
-        return this.exportAsPDF(transactions.data);
-      default:
-        throw new Error('Unsupported export format');
-    }
-  }
+  const rows = data.map(item => [
+    item.custom_order_id || '',
+    item.provider_collect_id || '',   // ✅ external Edviron reference
+    item.student_info?.name || '',
+    item.student_info?.email || '',
+    item.order_amount ?? 0,
+    item.transaction_amount ?? 0,
+    item.status || 'pending',
+    item.payment_mode || '',
+    item.gateway || '',
+    item.bank_reference || '',
+    item.payment_time ? new Date(item.payment_time).toISOString() : '',
+    item.createdAt ? new Date(item.createdAt).toISOString() : '', // ✅ fixed timestamp
+  ]);
 
-  private exportAsCSV(data: any[]): string {
-    if (!data || data.length === 0) {
-      return 'No data to export';
-    }
+  const csvContent = [
+    headers.join(','),                                   // header row
+    ...rows.map(row => row.map(cell => `"${cell}"`).join(',')), // escape values
+  ].join('\n');
 
-    const headers = [
-      'Order ID',
-      'Student Name',
-      'Student Email',
-      'Amount',
-      'Status',
-      'Payment Mode',
-      'Gateway',
-      'Bank Reference',
-      'Payment Time',
-      'Created At',
-    ];
+  return csvContent;
+}
 
-    const rows = data.map(item => [
-      item.custom_order_id,
-      item.student_info?.name || '',
-      item.student_info?.email || '',
-      item.order_amount,
-      item.status,
-      item.payment_mode || '',
-      item.gateway,
-      item.bank_reference || '',
-      item.payment_time || '',
-      item.created_at,
-    ]);
-
-    const csvContent = [
-      headers.join(','),
-      ...rows.map(row => row.map(cell => `"${cell}"`).join(',')),
-    ].join('\n');
-
-    return csvContent;
-  }
 
   private async exportAsPDF(data: any[]): Promise<Buffer> {
-    throw new Error('PDF export not yet implemented');
+  if (!data || data.length === 0) {
+    throw new Error('No data to export');
   }
 
-  private mapSortField(field: string): string {
-    const fieldMap = {
-      'created_at': 'created_at',
-      'payment_time': 'status_info.payment_time',
-      'amount': 'status_info.order_amount',
-      'status': 'status_info.status',
-      'custom_order_id': 'custom_order_id',
-    };
-    return fieldMap[field] || 'created_at';
-  }
+  return new Promise<Buffer>((resolve, reject) => {
+    try {
+      const doc = new PDFDocument({ margin: 30, size: 'A4' });
+      const stream = new streamBuffers.WritableStreamBuffer();
+
+
+      doc.pipe(stream);
+
+      // Title
+      doc.fontSize(18).text('Transactions Report', { align: 'center' });
+      doc.moveDown();
+
+      // Table headers
+      const headers = [
+        'Custom Order ID',
+        'Provider Collect ID',
+        'Student Name',
+        'Email',
+        'Amount',
+        'Transaction Amount',
+        'Status',
+        'Gateway',
+        'Payment Mode',
+        'Bank Ref',
+        'Payment Time',
+        'Created At',
+      ];
+
+      doc.fontSize(10).fillColor('#000').text(headers.join(' | '));
+      doc.moveDown();
+
+      // Rows
+      data.forEach((item) => {
+        const row = [
+          item.custom_order_id || '',
+          item.provider_collect_id || '',
+          item.student_info?.name || '',
+          item.student_info?.email || '',
+          (item.order_amount ?? 0).toString(),
+          (item.transaction_amount ?? 0).toString(),
+          item.status || 'pending',
+          item.gateway || '',
+          item.payment_mode || '',
+          item.bank_reference || '',
+          item.payment_time ? new Date(item.payment_time).toLocaleString() : '',
+          item.createdAt ? new Date(item.createdAt).toLocaleString() : '',
+        ];
+        doc.text(row.join(' | '));
+      });
+
+      doc.end();
+
+      const buffer = stream.getContents(); 
+      resolve(buffer || Buffer.alloc(0))
+    } catch (err) {
+      reject(err);
+    }
+  });
 }
+
+
+    private mapSortField(field: string): string {
+      const fieldMap = {
+        createdAt: 'createdAt',
+        'payment_time': 'status_info.payment_time',
+        'amount': 'status_info.order_amount',
+        'status': 'status_info.status',
+        'custom_order_id': 'custom_order_id',
+      };
+      return fieldMap[field] || 'created_at';
+    }
+  }

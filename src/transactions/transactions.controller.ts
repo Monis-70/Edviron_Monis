@@ -4,7 +4,6 @@ import {
   Query,
   Param,
   UseGuards,
-  Header,
   Res,
 } from '@nestjs/common';
 import { Response } from 'express';
@@ -34,7 +33,7 @@ export class TransactionsController {
 
   @Get('transaction-status/:customOrderId')
   @UseGuards(JwtAuthGuard)
-  async getTransactionStatu(@Param('customOrderId') customOrderId: string) {
+  async getTransactionStatus(@Param('customOrderId') customOrderId: string) {
     return this.transactionsService.getTransactionStatus(customOrderId);
   }
 
@@ -53,18 +52,25 @@ export class TransactionsController {
   ) {
     const data = await this.transactionsService.exportTransactions(format, filters);
 
-    if (format === 'csv') {
-      res.header('Content-Type', 'text/csv');
-      res.header('Content-Disposition', 'attachment; filename="transactions.csv"');
-      res.send(data);
-    } else if (format === 'json') {
-      res.header('Content-Type', 'application/json');
-      res.header('Content-Disposition', 'attachment; filename="transactions.json"');
-      res.json(data);
-    } else {
-      res.header('Content-Type', 'application/pdf');
-      res.header('Content-Disposition', 'attachment; filename="transactions.pdf"');
-      res.send(data);
+    switch (format) {
+      case 'csv':
+        res.setHeader('Content-Type', 'text/csv');
+        res.setHeader('Content-Disposition', 'attachment; filename="transactions.csv"');
+        return res.send(data);
+
+      case 'json':
+        res.setHeader('Content-Type', 'application/json');
+        res.setHeader('Content-Disposition', 'attachment; filename="transactions.json"');
+        return res.json(data);
+
+      case 'pdf':
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', 'attachment; filename="transactions.pdf"');
+        return res.send(data);
+
+      default:
+        res.setHeader('Content-Type', 'application/json');
+        return res.json({ success: false, message: 'Invalid export format' });
     }
   }
 }

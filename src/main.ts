@@ -17,50 +17,59 @@ async function bootstrap() {
   app.use(compression());
 
   // Rate limiting (express-rate-limit middleware)
-app.use(
-  rateLimit({
-    windowMs: 30 * 60 * 1000, // 30 minutes
-    max: 1000, // limit each IP to 1000 requests per window
-    message: 'Too many requests from this IP, please try again later.',
-  }),
-);
+  app.use(
+    rateLimit({
+      windowMs: 30 * 60 * 1000, // 30 minutes
+      max: 1000, // limit each IP to 1000 requests per window
+      message: 'Too many requests from this IP, please try again later.',
+    }),
+  );
 
+  // ✅ CORS config (dev = allow all, prod = restrict)
+  const allowedOrigins = [
+    'https://student-frontend-aiex.vercel.app',
+    'http://localhost:5173',
+    'http://127.0.0.1:5173',
+    'http://localhost:3000',
+    'http://localhost:4173',
+  ];
+  const isDev = process.env.NODE_ENV !== 'production';
 
-  // CORS - Fixed configuration for production and development
-const allowedOrigins = [
-  'https://student-frontend-aiex.vercel.app',
-  'http://localhost:5173',
-  'http://127.0.0.1:5173',
-  'http://localhost:3000',
-  'http://localhost:4173',
-];
+  app.enableCors({
+    origin: (origin, callback) => {
+      console.log('🌍 Request Origin:', origin);
 
-app.enableCors({
-  origin: (origin, callback) => {
-    if (!origin) return callback(null, true);
+      if (!origin) {
+        // Allow Postman/cURL
+        return callback(null, true);
+      }
 
-    if (allowedOrigins.includes(origin)) {
-      return callback(null, true);
-    }
+      if (isDev) {
+        // ✅ Allow all in dev
+        return callback(null, true);
+      }
 
-    console.log('❌ CORS blocked origin:', origin);
-    return callback(new Error(`Not allowed by CORS: ${origin}`), false);
-  },
-  credentials: true,
-  methods: 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',
-  allowedHeaders: [
-    'Content-Type',
-    'Authorization',
-    'X-Requested-With',
-    'Accept',
-    'Origin',
-  ],
-  exposedHeaders: ['Set-Cookie'],
-  optionsSuccessStatus: 200,
-});
+      if (allowedOrigins.includes(origin)) {
+        return callback(null, true);
+      }
 
+      console.log('❌ CORS blocked origin:', origin);
+      return callback(new Error(`Not allowed by CORS: ${origin}`), false);
+    },
+    credentials: true,
+    methods: 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',
+    allowedHeaders: [
+      'Content-Type',
+      'Authorization',
+      'X-Requested-With',
+      'Accept',
+      'Origin',
+    ],
+    exposedHeaders: ['Set-Cookie'],
+    optionsSuccessStatus: 200,
+  });
 
-  // Validation - Removed duplicate pipe configuration
+  // Validation
   app.useGlobalPipes(
     new ValidationPipe({
       whitelist: true,

@@ -29,7 +29,7 @@ export class TransactionFiltersDto {
 
   @IsOptional()
   @IsString()
-  sort?: string = 'created_at';
+  sort?: string = 'createdAt';   // ✅ fix
 
   @IsOptional()
   @IsEnum(['asc', 'desc'])
