@@ -35,39 +35,24 @@ async function bootstrap() {
   ];
   const isDev = process.env.NODE_ENV !== 'production';
 
-  app.enableCors({
-    origin: (origin, callback) => {
-      console.log('🌍 Request Origin:', origin);
+app.enableCors({
+  origin: [
+    'http://localhost:5173',
+    'http://127.0.0.1:5173',
+    'https://student-frontend-aiex.vercel.app',
+    'https://edviron-api.skill-jackpot.com',  // add backend itself for SSR or same-origin
+  ],
+  credentials: true,
+  methods: 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',
+  allowedHeaders: [
+    'Content-Type',
+    'Authorization',
+    'X-Requested-With',
+    'Accept',
+    'Origin',
+  ],
+});
 
-      if (!origin) {
-        // Allow Postman/cURL
-        return callback(null, true);
-      }
-
-      if (isDev) {
-        // ✅ Allow all in dev
-        return callback(null, true);
-      }
-
-      if (allowedOrigins.includes(origin)) {
-        return callback(null, true);
-      }
-
-      console.log('❌ CORS blocked origin:', origin);
-      return callback(new Error(`Not allowed by CORS: ${origin}`), false);
-    },
-    credentials: true,
-    methods: 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',
-    allowedHeaders: [
-      'Content-Type',
-      'Authorization',
-      'X-Requested-With',
-      'Accept',
-      'Origin',
-    ],
-    exposedHeaders: ['Set-Cookie'],
-    optionsSuccessStatus: 200,
-  });
 
   // Validation
   app.useGlobalPipes(
