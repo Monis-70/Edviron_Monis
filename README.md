@@ -5,7 +5,25 @@ It is built with  NestJS  and uses  MongoDB Atlas  as the database.
 The service handles payments, webhooks, and transaction management, and is deployed on a  KVM server with Nginx .
 
 ---
+Deployment
 
+Deployed on KVM server with Nginx reverse proxy and PM2.
+
+Example Nginx configuration:
+
+server {
+    listen 80;
+    server_name edviron-api.skill-jackpot.com;
+
+    location / {
+        proxy_pass http://localhost:3095;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_cache_bypass $http_upgrade;
+    }
+}
 ## Features
 
 -  Payment API Integration 
@@ -42,4 +60,6 @@ The service handles payments, webhooks, and transaction management, and is deplo
 -  User Schema  – For authentication and authorization
 
 ---
+
+
 
