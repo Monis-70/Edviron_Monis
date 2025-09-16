@@ -21,7 +21,8 @@
       const {
         page = 1,
         limit = 10,
-        sort = 'created_at',
+        sort = 'createdAt',
+
         order = 'desc',
         status,
         gateway,
@@ -59,12 +60,15 @@ order_amount: {
 transaction_amount: {
   $ifNull: ['$status_info.transaction_amount', '$amount']
 },
-      status: { $ifNull: ['$status_info.status', 'pending'] },
-      gateway_status: '$status_info.gateway_status',   // <-- add this
-      payment_mode: '$status_info.payment_mode',
-      payment_time: '$status_info.payment_time',
-      payment_message: '$status_info.payment_message',
-      bank_reference: '$status_info.bank_reference',
+      status: {
+  $ifNull: ['$status_info.status', '$gateway_status']  // fallback to gateway_status
+}
+
+      //gateway_status: '$status_info.gateway_status',   // <-- add this
+     // payment_mode: '$status_info.payment_mode',
+     // payment_time: '$status_info.payment_time',
+     // payment_message: '$status_info.payment_message',
+     // bank_reference: '$status_info.bank_reference',
     },
   });
 
@@ -79,12 +83,12 @@ transaction_amount: {
       }
 
       if (startDate || endDate) {
-        matchStage.created_at = {};
+        matchStage.createdAt = {};
         if (startDate) {
-          matchStage.created_at.$gte = new Date(startDate);
+          matchStage.createdAt.$gte = new Date(startDate);
         }
         if (endDate) {
-          matchStage.created_at.$lte = new Date(endDate);
+          matchStage.createdAt.$lte = new Date(endDate);
         }
       }
 
@@ -249,7 +253,8 @@ transaction_amount: {
   pipeline.push({
     $addFields: {
       order_amount: { $ifNull: ['$status_info.order_amount', '$amount'] },
-      transaction_amount: { $ifNull: ['$status_info.transaction_amount', '$amount'] },
+transaction_amount: { $ifNull: ['$status_info.transaction_amount', '$amount'] },
+
       status: { $ifNull: ['$status_info.status', 'pending'] },
       payment_time: {
         $ifNull: ['$status_info.payment_time', '$created_at'],
@@ -267,8 +272,8 @@ transaction_amount: {
 
   if (startDate || endDate) {
     matchFilters.created_at = {};
-    if (startDate) matchFilters.created_at.$gte = new Date(startDate);
-    if (endDate) matchFilters.created_at.$lte = new Date(endDate);
+    if (startDate) matchFilters.createdAt.$gte = new Date(startDate);
+    if (endDate) matchFilters.createdAt.$lte = new Date(endDate);
   }
 
   if (Object.keys(matchFilters).length > 0) {

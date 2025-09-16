@@ -1,24 +1,21 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
-import { Document, Types } from 'mongoose';  
+import { Document, Types } from 'mongoose';
 
 export type OrderStatusDocument = OrderStatus & Document;
 
 @Schema({ timestamps: true })
 export class OrderStatus {
   @Prop({ required: true, index: true })
-  custom_order_id: string;   // 👈 important, used in your service
+  custom_order_id: string;  // internal unique ID
 
   @Prop()
-  collect_request_id?: string;  // 👈 optional but supported
+  collect_request_id?: string;  // gateway request ID
 
-@Prop({ type: 'ObjectId', ref: 'Order', required: true })
-collect_id: Types.ObjectId;
-
-@Prop()
-provider_collect_id?: string; // 👈 string version (gateway ref)
+  @Prop({ type: Types.ObjectId, ref: 'Order', required: true })
+  collect_id: Types.ObjectId;   // reference to Order
 
   @Prop()
-  order_id?: string;            // 👈 fallback
+  provider_collect_id?: string; // raw provider ID
 
   @Prop({ type: Number })
   order_amount: number;
@@ -27,7 +24,7 @@ provider_collect_id?: string; // 👈 string version (gateway ref)
   transaction_amount: number;
 
   @Prop({ type: String, default: 'pending', index: true })
-  status: string;
+  status: string; // normalized status
 
   @Prop({ type: Date })
   payment_time?: Date;
@@ -45,20 +42,21 @@ provider_collect_id?: string; // 👈 string version (gateway ref)
   bank_reference?: string;
 
   @Prop()
-  gateway_status?: string;
+  gateway_status?: string; // raw gateway status
 
   @Prop()
   capture_status?: string;
 
   @Prop()
   payment_details?: string;
-   @Prop({ type: Object })
+
+  @Prop({ type: Object })
   metadata?: Record<string, any>;
 }
 
 export const OrderStatusSchema = SchemaFactory.createForClass(OrderStatus);
 
-// Indexes for queries
+// ✅ Useful indexes
 OrderStatusSchema.index({ custom_order_id: 1 });
 OrderStatusSchema.index({ collect_id: 1 });
 OrderStatusSchema.index({ status: 1 });

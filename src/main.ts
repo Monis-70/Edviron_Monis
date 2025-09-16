@@ -26,22 +26,25 @@ async function bootstrap() {
   );
 
   // ✅ CORS config (dev = allow all, prod = restrict)
-  const allowedOrigins = [
-    'https://student-frontend-aiex.vercel.app',
-    'http://localhost:5173',
-    'http://127.0.0.1:5173',
-    'http://localhost:3000',
-    'http://localhost:4173',
-  ];
-  const isDev = process.env.NODE_ENV !== 'production';
+
+
+// ✅ CORS config
+const allowedOrigins = [
+  'http://localhost:5173',
+  'http://127.0.0.1:5173',
+  'https://student-frontend-aiex.vercel.app',
+  'https://edviron-api.skill-jackpot.com',
+];
 
 app.enableCors({
-  origin: [
-    'http://localhost:5173',
-    'http://127.0.0.1:5173',
-    'https://student-frontend-aiex.vercel.app',
-    'https://edviron-api.skill-jackpot.com',  // add backend itself for SSR or same-origin
-  ],
+  origin: (origin, callback) => {
+    // allow requests with no origin (like mobile apps, curl)
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
   credentials: true,
   methods: 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',
   allowedHeaders: [
@@ -52,8 +55,6 @@ app.enableCors({
     'Origin',
   ],
 });
-
-
   // Validation
   app.useGlobalPipes(
     new ValidationPipe({

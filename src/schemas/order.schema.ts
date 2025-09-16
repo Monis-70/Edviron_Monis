@@ -1,4 +1,3 @@
-// src/schemas/order.schema.ts
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { Document, Types } from 'mongoose';
 
@@ -22,16 +21,15 @@ export class StudentInfo {
   @Prop()
   section?: string;
 }
-
 export const StudentInfoSchema = SchemaFactory.createForClass(StudentInfo);
 
 @Schema({ timestamps: true })
 export class Order {
   @Prop({ type: Types.ObjectId, required: true })
-  school_id: string;
+  school_id: Types.ObjectId;
 
   @Prop({ type: Types.ObjectId })
-  trustee_id: string;
+  trustee_id: Types.ObjectId;
 
   @Prop({ required: true })
   amount: number;
@@ -51,19 +49,19 @@ export class Order {
   @Prop()
   return_url?: string;
 
-  // ✅ Fix: allow any arbitrary JSON here (safe for providerResponse, etc.)
+  // ✅ Arbitrary metadata (providerResponse, collectRequestId, etc.)
   @Prop({ type: Object, default: {} })
   metadata?: Record<string, any>;
 
-  @Prop()
-  custom_order_id?: string;
+  @Prop({ required: true, unique: true })
+  custom_order_id: string;
 }
 
-// 👇 add timestamps in the type
-export type OrderDocument = Order &
-  Document & {
-    createdAt: Date;
-    updatedAt: Date;
-  };
+export type OrderDocument = Order & Document & {
+  createdAt: Date;
+  updatedAt: Date;
+};
 
 export const OrderSchema = SchemaFactory.createForClass(Order);
+OrderSchema.index({ custom_order_id: 1 });
+OrderSchema.index({ school_id: 1 });

@@ -47,54 +47,63 @@ export class PaymentsController {
     return this.paymentsService.getPaymentStatus(customOrderId);
   }
 
-  @Post('webhook')
-  async handleWebhook(@Req() req: Request) {
-    const payload = req.body;
-    this.logger.log('Webhook received:', JSON.stringify(payload));
+@Post('webhook')
+@Public() // 👈 add if you want it accessible without JWT
+async handleWebhook(@Req() req: Request) {
+  // 🔐 Secure with secret
+  const webhookSecret = process.env.WEBHOOK_SECRET;
+  const incomingSecret = req.headers['x-webhook-secret'];
 
-    const incoming = payload.order_info ?? payload;
-    const orderId =
-      incoming.order_id ||
-      incoming.collect_request_id ||
-      incoming.custom_order_id;
+  if (webhookSecret && incomingSecret !== webhookSecret) {
+    throw new BadRequestException('Invalid webhook secret');
+  }
 
-    if (!orderId) {
-      throw new BadRequestException('Invalid webhook payload - missing order id');
-    }
+  const payload = req.body;
+  this.logger.debug('Webhook received:', JSON.stringify(payload));
 
-    // Normalize status
-    const status =
-      incoming.status || payload.status || incoming.payment_status || 'PENDING';
+  const incoming = payload.order_info ?? payload;
+  const orderId =
+    incoming.order_id ||
+    incoming.collect_request_id ||
+    incoming.custom_order_id;
 
-    // Call service update
-    const updated = await this.paymentsService.updatePaymentStatus(
-      orderId,
-      status,
-      incoming,
-    );
+  if (!orderId) {
+    throw new BadRequestException('Invalid webhook payload - missing order id');
+  }
 
-    // If updatePaymentStatus returned null → order not found
-    if (!updated) {
-      return {
-        success: false,
-        message: 'Order not found',
-        orderId,
-      };
-    }
+  // Normalize status
+  const status =
+    (incoming.status || payload.status || incoming.payment_status || 'PENDING').toLowerCase();
 
+  // Call service update
+  const updated = await this.paymentsService.updatePaymentStatus(
+    orderId,
+    status,
+    incoming,
+  );
+
+  if (!updated) {
     return {
-      success: true,
-      order: {
-        orderId: updated._id?.toString() ?? orderId, // Mongo _id
-        custom_order_id: updated.custom_order_id ?? orderId, // internal ID
-        provider_collect_id: updated.provider_collect_id ?? null, // external gateway ID
-        status: updated.status,
-        amount: updated.transaction_amount ?? updated.order_amount ?? 0,
-        paymentMode: updated.payment_mode ?? 'N/A',
-        bankReference: updated.bank_reference ?? 'N/A',
-        paymentMessage: updated.payment_message ?? '',
-        paymentTime: updated.payment_time ?? new Date(),
-      },
+      success: false,
+      message: 'Order not found',
+      orderId,
     };
   }
+
+  return {
+    success: true,
+    order: {
+      orderId: updated._id?.toString() ?? orderId,
+      custom_order_id: updated.custom_order_id ?? orderId,
+      provider_collect_id: updated.provider_collect_id ?? null,
+      status: updated.status,
+      amount: updated.transaction_amount ?? updated.order_amount ?? 0,
+      paymentMode: updated.payment_mode ?? 'N/A',
+      bankReference: updated.bank_reference ?? 'N/A',
+      paymentMessage: updated.payment_message ?? '',
+      paymentTime: updated.payment_time ?? new Date(),
+    },
+  };
+}
+
 }
